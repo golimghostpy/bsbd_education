@@ -1,0 +1,15 @@
+--schemas
+CREATE SCHEMA IF NOT EXISTS app;
+CREATE SCHEMA IF NOT EXISTS ref;
+CREATE SCHEMA IF NOT EXISTS audit;
+CREATE SCHEMA IF NOT EXISTS stg;
+
+--roles
+CREATE ROLE app_reader;
+CREATE ROLE app_writer;
+CREATE ROLE app_owner;
+CREATE ROLE auditor;
+
+CREATE ROLE ddl_admin;
+CREATE ROLE dml_admin;
+CREATE ROLE security_admin;
