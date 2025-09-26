@@ -30,13 +30,14 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO app_reader;
 GRANT CONNECT ON DATABASE education_db TO app_writer;
 GRANT USAGE ON SCHEMA app TO app_writer;
 GRANT USAGE ON SCHEMA ref TO app_writer; 
-ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT, INSERT, UPDATE ON TABLES TO app_writer;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_writer;
 ALTER DEFAULT PRIVILEGES IN SCHEMA ref GRANT SELECT ON TABLES TO app_writer; --без справочников непонятно, что в бизнес-логике, однако запись необяз
 ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT USAGE ON SEQUENCES TO app_writer; -- без прав на автоинкремент не получится вставлять данные
 
 -- ###### права для роли app_owner (полный доступ к данным приложения из предыдущих двух ролей + ddl)
 GRANT CONNECT ON DATABASE education_db TO app_owner;
 GRANT USAGE ON SCHEMA ref, app TO app_owner;
+GRANT ALL PRIVILEGES ON SCHEMA app TO app_owner;
 ALTER DEFAULT PRIVILEGES IN SCHEMA ref, app GRANT ALL PRIVILEGES ON TABLES TO app_owner;
 ALTER DEFAULT PRIVILEGES IN SCHEMA ref, app GRANT ALL PRIVILEGES ON SEQUENCES TO app_owner; 
 
@@ -63,7 +64,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA ref, app, stg
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO dml_admin;
 ALTER DEFAULT PRIVILEGES IN SCHEMA ref, app, stg 
     GRANT USAGE ON SEQUENCES TO dml_admin;
-GRANT auditor TO dml_admin; -- для неповторяемости просмотра аудита
 
 -- ###### права для роли security_admin
 GRANT CONNECT ON DATABASE education_db TO security_admin;
@@ -287,3 +287,194 @@ FOREIGN KEY (dean_id) REFERENCES app.teachers(teacher_id);
 ALTER TABLE ref.departments 
 ADD CONSTRAINT fk_departments_head 
 FOREIGN KEY (head_of_department_id) REFERENCES app.teachers(teacher_id);
+
+
+--indexes
+-- индексы для внешних ключей
+CREATE INDEX idx_students_group_id ON app.students(group_id);
+CREATE INDEX idx_academic_plans_group_id ON app.academic_plans(group_id);
+CREATE INDEX idx_academic_plans_subject_id ON app.academic_plans(subject_id);
+CREATE INDEX idx_final_grades_student_id ON app.final_grades(student_id);
+CREATE INDEX idx_interim_grades_student_id ON app.interim_grades(student_id);
+
+-- индексы для основных сценариев
+-- расписание группы на неделю
+CREATE INDEX idx_class_schedule_group_week_day ON app.class_schedule(group_id, week_number, day_of_week);
+
+-- оценки студента за семестр
+CREATE INDEX idx_final_grades_student_semester ON app.final_grades(student_id, semester);
+
+-- поиск студентов/преподавателей по ФИО
+CREATE INDEX idx_students_name ON app.students(last_name, first_name);
+CREATE INDEX idx_teachers_name ON app.teachers(last_name, first_name);
+
+
+
+--заполнение таблицы teachers, поскольку rector_id берется из нее
+
+INSERT INTO app.teachers (last_name, first_name, patronymic, academic_degree, academic_title, email, phone_number) VALUES
+('Иванов', 'Петр', 'Сергеевич', 'Доктор наук', 'Профессор', 'ivanov@university.ru', '+7-900-123-45-67'),
+('Петрова', 'Мария', 'Ивановна', 'Кандидат наук', 'Доцент', 'petrova@university.ru', '+7-900-123-45-68'),
+('Сидоров', 'Алексей', 'Владимирович', 'Кандидат наук', 'Доцент', 'sidorov@university.ru', '+7-900-123-45-69'),
+('Кузнецова', 'Елена', 'Анатольевна', 'Доктор наук', 'Профессор', 'kuznetsova@university.ru', '+7-900-123-45-70'),
+('Смирнов', 'Дмитрий', 'Петрович', 'Кандидат наук', 'Доцент', 'smirnov@university.ru', '+7-900-123-45-71'),
+('Федорова', 'Ольга', 'Викторовна', 'Нет', 'Доцент', 'fedorova@university.ru', '+7-900-123-45-72'),
+('Батаев', 'Анатолий', 'Андреевич', 'Доктор наук', 'Профессор', 'rector@nstu.ru', '+7-383-346-08-43'),
+('Васильева', 'Анна', 'Сергеевна', 'Нет', 'Доцент', 'vasilyeva@university.ru', '+7-900-123-45-74'),
+('Алексеев', 'Игорь', 'Валентинович', 'Доктор наук', 'Профессор', 'alekseev@university.ru', '+7-900-123-45-75'),
+('Николаева', 'Татьяна', 'Борисовна', 'Кандидат наук', 'Доцент', 'nikolaeva@university.ru', '+7-900-123-45-76');
+
+--заполнение таблиц-справочников
+
+INSERT INTO ref.educational_institutions (institution_id, institution_name, short_name, legal_address, rector_id) VALUES
+(1, 'Национальный исследовательский университет "Высшая школа экономики"', 'НИУ ВШЭ', 'г. Москва, ул. Мясницкая, д. 20', 1),
+(2, 'Московский государственный университет имени М.В. Ломоносова', 'МГУ', 'г. Москва, Ленинские горы, д. 1', 4),
+(3, 'Московский физико-технический институт', 'МФТИ', 'г. Москва, ул. Климентовский пер, д. 1', 9),
+(4, 'Российский университет дружбы народов', 'РУДН', 'г. Москва, ул. Миклухо-Маклая, д. 6', 5),
+(5, 'Новосибирский государственный технический университет', 'НГТУ', 'г. Новосибирск, пр-т К.Маркса, д. 20', 7);
+
+INSERT INTO ref.faculties (faculty_id, faculty_name, dean_id, institution_id) VALUES
+(1, 'Факультет компьютерных наук', 2, 1),
+(2, 'Экономический факультет', 3, 1),
+(3, 'Механико-математический факультет', 6, 2),
+(4, 'Факультет вычислительной математики и кибернетики', 8, 2),
+(5, 'Факультет общей и прикладной физики', 10, 3),
+(6, 'Факультет инженерный', 1, 4),
+(7, 'Факультет экономический', 4, 4),
+(8, 'Факультет робототехники', 7, 5),
+(9, 'Факультет информатики', 9, 5),
+(10, 'Факультет прикладной математики', 5, 3);
+
+INSERT INTO ref.departments (department_id, department_name, head_of_department_id, faculty_id) VALUES
+(1, 'Кафедра программной инженерии', 1, 1),
+(2, 'Кафедра анализа данных', 2, 1),
+(3, 'Кафедра экономической теории', 3, 2),
+(4, 'Кафедра высшей математики', 4, 3),
+(5, 'Кафедра системного программирования', 5, 4),
+(6, 'Кафедра теоретической физики', 6, 5),
+(7, 'Кафедра инженерной механики', 7, 6),
+(8, 'Кафедра финансов', 8, 7),
+(9, 'Кафедра робототехнических систем', 9, 8),
+(10, 'Кафедра искусственного интеллекта', 10, 9);
+
+INSERT INTO ref.study_groups (group_id, group_name, admission_year, faculty_id) VALUES
+(1, 'АБ-320', 2023, 1),
+(2, 'ПИ-02', 2023, 1),
+(3, 'ЭК-01', 2023, 2),
+(4, 'ЭК-02', 2023, 2),
+(5, 'ММ-01', 2023, 3),
+(6, 'ВМК-01', 2023, 4),
+(7, 'ФИЗ-01', 2023, 5),
+(8, 'ИНЖ-01', 2023, 6),
+(9, 'РОБ-01', 2023, 8),
+(10, 'ИИ-01', 2023, 9);
+
+INSERT INTO ref.subjects (subject_id, subject_name, description) VALUES
+(1, 'Математический анализ', 'Дифференциальное и интегральное исчисление'),
+(2, 'Линейная алгебра', 'Векторные пространства, матрицы, системы линейных уравнений'),
+(3, 'Программирование на Python', 'Основы программирования на языке Python'),
+(4, 'Базы данных', 'Проектирование и работа с реляционными базами данных'),
+(5, 'Теория вероятностей', 'Вероятностные модели и статистические методы'),
+(6, 'Экономика', 'Основы микро- и макроэкономики'),
+(7, 'Физика', 'Механика, термодинамика, электромагнетизм'),
+(8, 'Алгоритмы и структуры данных', 'Анализ алгоритмов, основные структуры данных'),
+(9, 'Машинное обучение', 'Методы и алгоритмы машинного обучения'),
+(10, 'Веб-разработка', 'Создание веб-приложений');
+
+INSERT INTO ref.final_grade_types (final_grade_type_id, grade_system_name, allowed_values) VALUES
+(1, '5-балльная система', '2,3,4,5'),
+(2, 'Зачет/Незачет', 'Зачет,Незачет'),
+(3, '100-балльная система', '0-100'),
+(4, 'Буквенная система', 'A,B,C,D,E,F'),
+(5, '10-балльная система', '1-10');
+
+--заполнение основных таблиц
+DELETE FROM app.students;
+INSERT INTO app.students (last_name, first_name, patronymic, student_card_number, email, phone_number, group_id, status) VALUES
+('Соколов', 'Александр', 'Игоревич', 'СТ-2023-001', 'sokolov@student.ru', '+7-900-200-01-01', 1, 'Обучается'),
+('Орлова', 'Виктория', 'Сергеевна', 'СТ-2023-002', 'orlova@student.ru', '+7-900-200-01-02', 1, 'Обучается'),
+('Лебедев', 'Максим', 'Александрович', 'СТ-2023-003', 'lebedev@student.ru', '+7-900-200-01-03', 2, 'Обучается'),
+('Егорова', 'Анастасия', 'Дмитриевна', 'СТ-2023-004', 'egorova@student.ru', '+7-900-200-01-04', 2, 'Академический отпуск'),
+('Козлов', 'Артем', 'Витальевич', 'СТ-2023-005', 'kozlov@student.ru', '+7-900-200-01-05', 3, 'Обучается'),
+('Новикова', 'Екатерина', 'Андреевна', 'СТ-2023-006', 'novikova@student.ru', '+7-900-200-01-06', 3, 'Обучается'),
+('Морозов', 'Иван', 'Олегович', 'СТ-2023-007', 'morozov@student.ru', '+7-900-200-01-07', 4, 'Отчислен'),
+('Павлова', 'София', 'Романовна', 'СТ-2023-008', 'pavlova@student.ru', '+7-900-200-01-08', 4, 'Обучается'),
+('Волков', 'Кирилл', 'Иванович', 'СТ-2023-009', 'volkov@student.ru', '+7-900-200-01-09', 5, 'Обучается'),
+('Андреева', 'Дарья', 'Викторовна', 'СТ-2023-010', 'andreeva@student.ru', '+7-900-200-01-10', 5, 'Выпустился');
+
+DELETE FROM app.teacher_departments;
+INSERT INTO app.teacher_departments (teacher_id, department_id, is_main, position) VALUES
+(1, 1, true, 'Профессор'),
+(2, 2, true, 'Доцент'),
+(3, 3, true, 'Доцент'),
+(4, 4, true, 'Профессор'),
+(5, 5, true, 'Доцент'),
+(6, 6, true, 'Старший преподаватель'),
+(7, 7, true, 'Доцент'),
+(8, 8, true, 'Старший преподаватель'),
+(9, 9, true, 'Профессор'),
+(10, 10, true, 'Доцент');
+
+DELETE FROM app.academic_plans;
+INSERT INTO app.academic_plans (group_id, subject_id, semester, total_hours, lecture_hours, practice_hours, control_type) VALUES
+(1, 1, 1, 144, 72, 72, 'Экзамен'),
+(1, 2, 1, 108, 54, 54, 'Зачет'),
+(2, 3, 1, 144, 72, 72, 'Экзамен'),
+(2, 4, 1, 90, 45, 45, 'Зачет'),
+(3, 5, 2, 120, 60, 60, 'Экзамен'),
+(3, 6, 2, 96, 48, 48, 'Зачет'),
+(4, 7, 2, 132, 66, 66, 'Экзамен'),
+(4, 8, 2, 84, 42, 42, 'Зачет'),
+(5, 9, 3, 156, 78, 78, 'Экзамен'),
+(5, 10, 3, 102, 51, 51, 'Зачет');
+
+DELETE FROM app.final_grades;
+INSERT INTO app.final_grades (student_id, subject_id, teacher_id, final_grade_type_id, final_grade_value, grade_date, semester) VALUES
+(1, 1, 1, 1, '5', '2024-01-20', 1),
+(2, 1, 1, 1, '4', '2024-01-20', 1),
+(3, 3, 2, 1, '5', '2024-01-21', 1),
+(4, 4, 3, 1, '3', '2024-01-22', 1),
+(5, 5, 4, 1, '4', '2024-06-15', 2),
+(6, 6, 5, 1, '5', '2024-06-16', 2),
+(7, 7, 6, 1, '2', '2024-06-17', 2),
+(8, 8, 7, 1, '4', '2024-06-18', 2),
+(9, 9, 8, 1, '5', '2024-12-20', 3),
+(10, 10, 9, 1, '3', '2024-12-21', 3);
+
+DELETE FROM app.interim_grades;
+INSERT INTO app.interim_grades (student_id, subject_id, teacher_id, grade_value, grade_date, grade_description, semester) VALUES
+(1, 1, 1, '5', '2023-10-15', 'Контрольная работа 1', 1),
+(1, 1, 1, '4', '2023-11-20', 'Контрольная работа 2', 1),
+(2, 1, 1, '4', '2023-10-15', 'Контрольная работа 1', 1),
+(3, 3, 2, '5', '2023-10-16', 'Контрольная работа 1', 1),
+(5, 5, 4, '4', '2024-03-10', 'Лабораторная работа', 2),
+(6, 6, 5, '5', '2024-03-12', 'Практическое задание', 2),
+(8, 8, 7, '3', '2024-03-15', 'Тестирование', 2),
+(9, 9, 8, '5', '2024-09-20', 'Курсовая работа', 3),
+(9, 9, 8, '4', '2024-10-25', 'Проект', 3),
+(10, 10, 9, '3', '2024-09-22', 'Семинар', 3);
+
+DELETE FROM app.class_schedule;
+INSERT INTO app.class_schedule (group_id, subject_id, teacher_id, week_number, day_of_week, start_time, end_time, classroom, building_number, lesson_type) VALUES
+(1, 1, 1, 1, 'Понедельник', '09:00', '10:30', '101', '1', 'Лекция'),
+(1, 2, 1, 1, 'Среда', '10:40', '12:10', '201', '1', 'Практика'),
+(2, 3, 2, 1, 'Вторник', '09:00', '10:30', '102', '1', 'Лекция'),
+(2, 4, 3, 1, 'Четверг', '13:30', '15:00', '301', '2', 'Лабораторная'),
+(3, 5, 4, 2, 'Понедельник', '15:10', '16:40', '401', '3', 'Лекция'),
+(3, 6, 5, 2, 'Пятница', '12:20', '13:50', '501', '3', 'Практика'),
+(4, 7, 6, 2, 'Среда', '16:50', '18:20', '601', '4', 'Лабораторная'),
+(4, 8, 7, 2, 'Суббота', '10:40', '12:10', '701', '4', 'Лекция'),
+(5, 9, 8, 3, 'Вторник', '13:30', '15:00', '801', '5', 'Практика'),
+(5, 10, 9, 3, 'Четверг', '15:10', '16:40', '901', '5', 'Лабораторная');
+
+INSERT INTO app.student_documents (student_id, document_type, document_series, document_number, issue_date, issuing_authority) VALUES
+(1, 'Паспорт', '4501', '123456', '2018-04-15', 'ОУФМС России по г. Москве'),
+(1, 'Аттестат', NULL, '789-123', '2022-06-25', 'Гимназия №1 г. Москвы'),
+(2, 'Паспорт', '4502', '234567', '2019-05-20', 'ОУФМС России по г. Москве'),
+(2, 'Аттестат', NULL, '789-124', '2022-06-25', 'Лицей №2 г. Москвы'),
+(3, 'Паспорт', '4503', '345678', '2020-03-10', 'ОУФМС России по г. Москве'),
+(3, 'Мед. справка', NULL, '086У-2023', '2023-08-15', 'Поликлиника №1'),
+(4, 'Паспорт', '4504', '456789', '2018-07-12', 'ОУФМС России по г. Москве'),
+(4, 'ИНН', NULL, '1234567890', '2023-09-01', 'ИФНС России по г. Москве'),
+(5, 'Паспорт', '4505', '567890', '2019-11-05', 'ОУФМС России по г. Москве'),
+(5, 'СНИЛС', NULL, '123-456-789-01', '2023-09-01', 'ПФР по г. Москве');
