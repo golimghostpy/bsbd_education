@@ -1,5 +1,7 @@
 --revoke
-REVOKE CONNECT ON DATABASE education_db FROM PUBLIC;
+REVOKE ALL ON DATABASE education_db FROM PUBLIC;
+
+CREATE ROLE test_connect WITH LOGIN;
 
 --schemas
 CREATE SCHEMA IF NOT EXISTS app;
@@ -16,6 +18,68 @@ CREATE ROLE auditor;
 CREATE ROLE ddl_admin;
 CREATE ROLE dml_admin;
 CREATE ROLE security_admin;
+
+--privileges
+-- права для роли app_reader (только чтение данных приложения)
+GRANT CONNECT ON DATABASE education_db TO app_reader;
+GRANT USAGE ON SCHEMA ref, app TO app_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA ref TO app_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA app TO app_reader;
+
+-- права для роли app_writer (чтение и запись данных приложения)
+GRANT CONNECT ON DATABASE education_db TO app_writer;
+GRANT USAGE ON SCHEMA app TO app_writer;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA app TO app_writer;
+GRANT USAGE ON SCHEMA ref TO app_writer;
+GRANT SELECT ON ALL TABLES IN SCHEMA ref TO app_writer;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA app TO app_writer; --для разрешения автоинкремента
+
+-- права для роли app_owner (полный доступ к данным приложения)
+GRANT CONNECT ON DATABASE education_db TO app_owner;
+GRANT USAGE ON SCHEMA ref, app TO app_owner;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA ref, app TO app_owner;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ref, app TO app_owner;
+
+-- права для роли auditor (доступ к аудиту + чтение данных)
+GRANT CONNECT ON DATABASE education_db TO auditor;
+GRANT USAGE ON SCHEMA audit TO auditor;
+GRANT SELECT ON ALL TABLES IN SCHEMA audit TO auditor;
+
+-- права для роли ddl_admin (управление структурой БД)
+GRANT CONNECT ON DATABASE education_db TO ddl_admin;
+GRANT USAGE ON SCHEMA app, public, ref, stg, audit TO ddl_admin;
+GRANT CREATE ON SCHEMA app, public, ref, stg, audit TO ddl_admin;
+GRANT REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA app, public, ref, stg, audit TO ddl_admin;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA app, public, ref, stg, audit TO ddl_admin;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app, public, ref, stg, audit TO ddl_admin;
+GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA app, public, ref, stg, audit TO ddl_admin;
+
+-- права для роли dml_admin (управление данными во всех схемах)
+GRANT CONNECT ON DATABASE education_db TO dml_admin;
+GRANT USAGE ON SCHEMA ref, app, stg TO dml_admin;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ref, app, stg TO dml_admin;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA ref, app, stg, audit TO dml_admin;
+GRANT auditor TO dml_admin; -- только чтение логов
+
+-- права для роли security_admin
+GRANT CONNECT ON DATABASE education_db TO security_admin;
+GRANT USAGE ON SCHEMA app, ref, stg, audit TO security_admin WITH GRANT OPTION; -- права на использование схем и возможность делегирования этих прав
+-- права на управление ролями и правами
+ALTER ROLE security_admin CREATEROLE; -- право создавать и удалять роли
+GRANT auditor TO security_admin;
+-- право просматривать системную информацию о ролях и привилегиях
+GRANT SELECT ON pg_roles TO security_admin; -- видеть роли
+GRANT SELECT ON pg_auth_members TO security_admin; -- видеть членство в ролях
+-- право на информацию о таблицах, схемах и активных сеансах
+GRANT SELECT ON pg_tables TO security_admin; -- все табл в БД
+GRANT SELECT ON pg_namespace TO security_admin; -- инфа о схемах
+GRANT SELECT ON pg_stat_activity TO security_admin; -- для просмотра активных сеансов
+GRANT SELECT ON pg_locks TO security_admin; -- для анализа блокировок
+-- Дополнительные административные права
+GRANT pg_read_all_settings TO security_admin; -- просмотр конфиги БД
+GRANT pg_signal_backend TO security_admin; -- завершать сессии
+GRANT pg_read_all_stats TO security_admin; -- просмотр всей статистики БД (производительность, использование индексов и т.д.)
+
 
 -- Создание ENUM типов
 CREATE TYPE academic_degree_enum AS ENUM ('Кандидат наук', 'Доктор наук', 'Нет');
