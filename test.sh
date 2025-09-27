@@ -10,7 +10,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 check_connection() {
-    check_connect=$(sudo docker exec -i postgres psql -U test_connect -d education_db 2>&1)
+    check_connect=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db 2>&1)
 
     if [ -n "$(echo "$check_connect" | grep -i "error")" ]; then
         echo -e "${GREEN}УСПЕХ!${NC}"
@@ -25,7 +25,7 @@ manage_role() {
     local action=$1
     local role=$2
     if [ "$action" = "GRANT" ]; then
-        sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT $role TO test_connect;" 2>&1
+        sudo docker exec -i postgres psql -h localhost -U postgres -d education_db -c "GRANT $role TO test_connect;" 2>&1
     else
         sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE $role FROM test_connect;" 2>&1
     fi
@@ -42,7 +42,7 @@ check_command() {
     fi
     
     echo "Тестирование: $test_name"
-    result=$(sudo docker exec -i postgres psql -U test_connect -d education_db -c "$command" 2>&1)
+    result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "$command" 2>&1)
     
     if [ "$expected_result" = "success" ]; then
         if [ -z "$(echo "$result" | grep -i "error")" ]; then
@@ -60,6 +60,18 @@ check_command() {
         fi
     fi
     echo ""
+}
+
+check_audit() {
+    check_audit_result=$(sudo docker exec -i postgres psql -h localhost -U postgres -d education_db -c "SELECT username FROM audit.login_log" 2>&1)
+
+    if [ $(echo "$check_audit_result" | wc -l) -gt 5 ]; then
+        echo -e "${GREEN}УСПЕХ!${NC}"
+        echo "$check_audit_result" | head -n 5
+    else
+        echo -e "${RED}ОШИБКА${NC}"
+        echo "$check_audit_result"
+    fi
 }
 
 # Функция для подготовки тестовых данных
@@ -229,3 +241,7 @@ echo "Забираем право CONNECT у пользователя test_conne
 sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE CONNECT ON DATABASE education_db FROM test_connect;" 2>&1
 
 echo -e "${YELLOW}=== Конец тестирования привилегий ===${NC}"
+
+echo -e "${YELLOW}=== Тестирование audit.login_log ===${NC}"
+check_audit
+echo -e "${YELLOW}=== Конец тестирования аудита ===${NC}"

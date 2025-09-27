@@ -478,3 +478,25 @@ INSERT INTO app.student_documents (student_id, document_type, document_series, d
 (4, 'ИНН', NULL, '1234567890', '2023-09-01', 'ИФНС России по г. Москве'),
 (5, 'Паспорт', '4505', '567890', '2019-11-05', 'ОУФМС России по г. Москве'),
 (5, 'СНИЛС', NULL, '123-456-789-01', '2023-09-01', 'ПФР по г. Москве');
+
+--logon trigger
+CREATE OR REPLACE FUNCTION audit.login_audit()
+RETURNS event_trigger
+LANGUAGE plpgsql
+SECURITY DEFINER --функция выполняется с правами её владельца, а не текущего пользователя, что даст вставку в аудит
+AS $$
+BEGIN
+    INSERT INTO audit.login_log (login_time, username, client_ip)
+    VALUES (
+        CURRENT_TIMESTAMP,
+        session_user,
+        inet_client_addr()
+    );
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+$$;
+CREATE EVENT TRIGGER login_audit_tg
+ON login
+EXECUTE FUNCTION audit.login_audit();
