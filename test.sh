@@ -67,7 +67,7 @@ check_audit() {
 
     if [ $(echo "$check_audit_result" | wc -l) -gt 5 ]; then
         echo -e "${GREEN}УСПЕХ!${NC}"
-        echo "$check_audit_result" | head -n 5
+        echo "$check_audit_result" | head -n 7
     else
         echo -e "${RED}ОШИБКА${NC}"
         echo "$check_audit_result"
@@ -114,8 +114,9 @@ cleanup_test_data() {
     DELETE FROM ref.faculties WHERE faculty_name = 'Тестовый Факультет';
     DELETE FROM ref.educational_institutions WHERE institution_name = 'Тестовый Университет';
     DELETE FROM audit.login_log WHERE username = 'test_user';
-    DROP TABLE IF EXISTS app.test_table, app.unauthorized_table, ref.unauthorized_ref_table;
+    DROP TABLE IF EXISTS app.test_table, app.unauthorized_table, ref.unauthorized_ref_table, app.test_table1;
     DROP TABLE IF EXISTS audit.unauthorized_audit_table;
+    COMMENT ON SCHEMA app IS 'NULL'
 EOF
 }
 
@@ -138,13 +139,13 @@ echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_reader ===${NC}"
 manage_role "GRANT" "app_reader"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "SELECT * FROM app.students LIMIT 1;" "app_reader: SELECT в схеме app" "success"
-check_command "SELECT * FROM ref.faculties LIMIT 1;" "app_reader: SELECT в схеме ref" "success"
+check_command "SELECT first_name FROM app.students LIMIT 1;" "app_reader: SELECT в схеме app" "success"
+check_command "SELECT faculty_id FROM ref.faculties LIMIT 1;" "app_reader: SELECT в схеме ref" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id) VALUES ('Тестов', 'test3', 'TEST003', 1);" "app_reader: INSERT в схеме app" "error"
 check_command "CREATE TABLE app.unauthorized_table (id serial);" "app_reader: CREATE TABLE в схеме app" "error"
-check_command "SELECT * FROM audit.login_log LIMIT 1;" "app_reader: SELECT в схеме audit" "error"
+check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "app_reader: SELECT в схеме audit" "error"
 
 manage_role "REVOKE" "app_reader"
 
@@ -154,11 +155,11 @@ manage_role "GRANT" "app_writer"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
 check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id) VALUES ('Тестов', 'test2', 'TEST002', 1);" "app_writer: INSERT в схеме app" "success"
-check_command "SELECT * FROM ref.faculties LIMIT 1;" "app_writer: SELECT в схеме ref" "success"
+check_command "SELECT faculty_id FROM ref.faculties LIMIT 1;" "app_writer: SELECT в схеме ref" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "CREATE TABLE app.unauthorized_table (id serial);" "app_writer: CREATE TABLE в схеме app" "error"
-check_command "SELECT * FROM audit.login_log LIMIT 1;" "app_writer: SELECT в схеме audit" "error"
+check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "app_writer: SELECT в схеме audit" "error"
 
 manage_role "REVOKE" "app_writer"
 
@@ -169,10 +170,12 @@ manage_role "GRANT" "app_owner"
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
 check_command "DELETE FROM app.students WHERE student_card_number = 'TEST002';" "app_owner: DELETE в схеме app" "success"
 check_command "CREATE TABLE app.test_table (id serial, name text);" "app_owner: CREATE TABLE в схеме app" "success"
+check_command "COMMENT ON SCHEMA app IS 'тестовый комм';" "app_owner: COMMENT ON TABLE в схеме app" "success"
+check_command "SELECT obj_description((SELECT oid FROM pg_namespace WHERE nspname = 'app'));" "app_owner: SELECT COMMENT ON TABLE в схеме app" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "CREATE TABLE ref.unauthorized_ref_table (id serial);" "app_owner: CREATE TABLE в схеме ref" "error"
-check_command "SELECT * FROM audit.login_log LIMIT 1;" "app_owner: SELECT в схеме audit" "error"
+check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "app_owner: SELECT в схеме audit" "error"
 
 manage_role "REVOKE" "app_owner"
 
@@ -181,7 +184,7 @@ echo -e "${BLUE}=== ТЕСТИРОВАНИЕ auditor ===${NC}"
 manage_role "GRANT" "auditor"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "SELECT * FROM audit.login_log LIMIT 1;" "auditor: SELECT в схеме audit" "success"
+check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "auditor: SELECT в схеме audit" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "INSERT INTO audit.login_log (username, client_ip) VALUES ('test', '127.0.0.1');" "auditor: INSERT в схеме audit" "error"
@@ -215,7 +218,7 @@ check_command "UPDATE app.students SET last_name = 'Updated' WHERE student_card_
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "CREATE TABLE app.unauthorized_table (id serial);" "dml_admin: CREATE TABLE в схеме app" "error"
 check_command "INSERT INTO audit.login_log (username, client_ip) VALUES ('test', '127.0.0.1');" "dml_admin: INSERT в схеме audit" "error"
-check_command "SELECT * FROM audit.login_log LIMIT 1;" "dml_admin: SELECT в схеме audit (через роль auditor)" "error"
+check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "dml_admin: SELECT в схеме audit (через роль auditor)" "error"
 
 manage_role "REVOKE" "dml_admin"
 
