@@ -13,9 +13,9 @@ check_connection() {
     check_connect=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db 2>&1)
 
     if [ -n "$(echo "$check_connect" | grep -i "error")" ]; then
-        echo -e "${GREEN}УСПЕХ!${NC}"
+        echo -e "${GREEN}УСПЕХ! Доступ ограничен${NC}"
     else
-        echo -e "${RED}ОШИБКА${NC}"
+        echo -e "${RED}ОШИБКА. Предоставлен доступ${NC}"
         echo $check_connect
     fi
 }
@@ -97,11 +97,6 @@ prepare_test_data() {
     FROM ref.study_groups 
     WHERE group_name = 'TEST-01' 
     AND NOT EXISTS (SELECT 1 FROM app.students WHERE student_card_number = 'TEST001');
-    
-    -- Создаем тестовую таблицу для аудита
-    INSERT INTO audit.login_log (username, client_ip) 
-    VALUES ('test_user', '192.168.1.1')
-    ON CONFLICT DO NOTHING;
 EOF
 }
 
@@ -113,7 +108,6 @@ cleanup_test_data() {
     DELETE FROM ref.study_groups WHERE group_name = 'TEST-01';
     DELETE FROM ref.faculties WHERE faculty_name = 'Тестовый Факультет';
     DELETE FROM ref.educational_institutions WHERE institution_name = 'Тестовый Университет';
-    DELETE FROM audit.login_log WHERE username = 'test_user';
     DROP TABLE IF EXISTS app.test_table, app.unauthorized_table, ref.unauthorized_ref_table, app.test_table1;
     DROP TABLE IF EXISTS audit.unauthorized_audit_table;
     COMMENT ON SCHEMA app IS 'NULL'
