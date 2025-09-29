@@ -229,7 +229,7 @@ CREATE TABLE app.interim_grades (
     student_id INT NOT NULL,
     subject_id INT NOT NULL,
     teacher_id INT NOT NULL,
-    grade_value VARCHAR(10) NOT NULL,
+    grade_value VARCHAR(5) NOT NULL,
     grade_date DATE NOT NULL DEFAULT CURRENT_DATE,
     grade_description VARCHAR(100),
     semester INT NOT NULL,
