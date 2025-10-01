@@ -61,8 +61,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE ddl_admin IN SCHEMA app, public, ref, stg, aud
     GRANT REFERENCES, TRIGGER ON TABLES TO ddl_admin;
 ALTER DEFAULT PRIVILEGES FOR ROLE ddl_admin IN SCHEMA app, public, ref, stg, audit 
     GRANT USAGE ON SEQUENCES TO ddl_admin;
-ALTER DEFAULT PRIVILEGES FOR ROLE ddl_admin IN SCHEMA app, public, ref, stg, audit 
-    GRANT EXECUTE ON FUNCTIONS TO ddl_admin;
 
 -- ###### права для роли dml_admin
 GRANT CONNECT ON DATABASE education_db TO dml_admin;
