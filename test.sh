@@ -74,6 +74,37 @@ check_audit() {
     fi
 }
 
+# Функция для проверки выполнения команды функций
+check_function() {
+    local function_call=$1
+    local test_name=$2
+    local expected_result=$3  # "success" или "error"
+    
+    if [ -z "$expected_result" ]; then
+        expected_result="success"
+    fi
+    
+    echo "Тестирование: $test_name"
+    result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "$function_call" 2>&1)
+    
+    if [ "$expected_result" = "success" ]; then
+        if [ -z "$(echo "$result" | grep -i "error")" ]; then
+            echo -e "${GREEN}+++ УСПЕХ: Функция выполнена (как и ожидалось)${NC}"
+        else
+            echo -e "${RED}--- ОШИБКА: Функция не выполнена (но должна была)${NC}"
+            echo "$result"
+        fi
+    else
+        if [ -n "$(echo "$result" | grep -i "error")" ]; then
+            echo -e "${GREEN}+++ УСПЕХ: Функция отклонена (как и ожидалось)${NC}"
+        else
+            echo -e "${RED}--- ОШИБКА: Функция выполнена (но не должна была)${NC}"
+            echo "$result"
+        fi
+    fi
+    echo ""
+}
+
 # Функция для подготовки тестовых данных
 prepare_test_data() {
     echo "Подготовка тестовых данных..."
@@ -229,6 +260,62 @@ check_command "CREATE TABLE app.unauthorized_table (id serial);" "security_admin
 check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id) VALUES ('Тестов', 'test4', 'TEST004', 1);" "security_admin: INSERT в схеме app" "error"
 
 manage_role "REVOKE" "security_admin"
+
+
+echo -e "${YELLOW}=== Тестирование SECURITY DEFINER функций ===${NC}"
+echo ""
+
+echo "Выдаем права CONNECT и app_writer пользователю test_connect"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT CONNECT ON DATABASE education_db TO test_connect;" 2>&1
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+
+# 1. Тестирование функции enroll_student
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ enroll_student ===${NC}"
+
+echo -e "${CYAN}--- Успешное выполнение ---${NC}"
+check_function "SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex@student.ru', '+7-900-300-01-01', 1);" "enroll_student: успешное зачисление" "success"
+
+echo -e "${PURPLE}--- Неудачное выполнение (без прав) ---${NC}"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
+check_function "SELECT app.enroll_student('Петров', 'Иван', 'Сергеевич', 'petrov_ivan@student.ru', '+7-900-300-01-02', 2);" "enroll_student: отсутствуют права app_writer" "error"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+
+# 2. Тестирование функции register_final_grade
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ register_final_grade ===${NC}"
+
+echo -e "${CYAN}--- Успешное выполнение ---${NC}"
+check_function "SELECT app.register_final_grade(1, 2, 1, 1, '4', 1);" "register_final_grade: успешная регистрация оценки" "success"
+
+echo -e "${PURPLE}--- Неудачное выполнение (без прав) ---${NC}"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
+check_function "SELECT app.register_final_grade(2, 3, 2, 1, '5', 1);" "register_final_grade: отсутствуют права app_writer" "error"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+
+# 3. Тестирование функции add_student_document
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ add_student_document ===${NC}"
+
+echo -e "${CYAN}--- Успешное выполнение ---${NC}"
+check_function "SELECT app.add_student_document(6, 'ИНН', NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: успешное добавление документа" "success"
+
+echo -e "${PURPLE}--- Неудачное выполнение (без прав) ---${NC}"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
+check_function "SELECT app.add_student_document(7, 'СНИЛС', NULL, '098-765-432-02', '2023-08-20', 'ПФР России');" "add_student_document: отсутствуют права app_writer" "error"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+
+# Очистка тестовых данных
+echo "Очистка тестовых данных..."
+sudo docker exec -i postgres psql -U postgres -d education_db << EOF
+DELETE FROM app.students WHERE email = 'novikov_alex@student.ru';
+DELETE FROM app.final_grades WHERE student_id = 1 AND subject_id = 2 AND semester = 1;
+DELETE FROM app.student_documents WHERE document_number = '0987654321';
+EOF
+
+# Забираем права в конце
+echo "Забираем права у пользователя test_connect"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE CONNECT ON DATABASE education_db FROM test_connect;" 2>&1
+
+echo -e "${YELLOW}=== Конец тестирования SECURITY DEFINER функций ===${NC}"
 
 # Очистка тестовых данных
 cleanup_test_data
