@@ -539,12 +539,31 @@ DECLARE
     v_subject_exists BOOLEAN;
     v_grade_type_exists BOOLEAN;
     v_allowed_values VARCHAR(255);
+    v_current_role VARCHAR(30);
+    v_call_id INT;
 BEGIN
+    -- Получение роли, от которой могла быть вызвана функция
+    SELECT m.rolname as role_name
+    INTO v_current_role
+    FROM pg_user u 
+    JOIN pg_auth_members am ON u.usesysid = am.member
+    JOIN pg_roles m ON am.roleid = m.oid
+    WHERE u.usename = session_user
+        AND has_function_privilege(m.rolname, 'app.register_final_grade(
+        INT,
+        INT, 
+        INT,
+        INT,
+        VARCHAR(10),
+        INT
+    )', 'EXECUTE')
+    LIMIT 1;
+
     -- Логирование вызова
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'register_final_grade',
-        session_user,
+        v_current_role,
         jsonb_build_object(
             'student_id', p_student_id,
             'subject_id', p_subject_id,
@@ -554,7 +573,7 @@ BEGIN
             'semester', p_semester
         ),
         true
-    );
+    ) RETURNING call_id INTO v_call_id;
     
     --Проверка существования id
     SELECT EXISTS(SELECT 1 FROM app.students WHERE student_id = p_student_id) INTO v_student_exists;
@@ -563,23 +582,19 @@ BEGIN
     SELECT EXISTS(SELECT 1 FROM ref.final_grade_types WHERE final_grade_type_id = p_final_grade_type_id) INTO v_grade_type_exists;
     
     IF NOT v_student_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
     END IF;
     IF NOT v_teacher_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Преподаватель с ID % не найден', p_teacher_id;
     END IF;
     IF NOT v_subject_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Дисциплина с ID % не найдена', p_subject_id;
     END IF;
     IF NOT v_grade_type_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Тип оценки с ID % не найден', p_final_grade_type_id;
     END IF;
     
@@ -589,16 +604,14 @@ BEGIN
     WHERE final_grade_type_id = p_final_grade_type_id;
     
     IF v_allowed_values NOT LIKE '%' || p_final_grade_value || '%' THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Оценка "%" недопустима для выбранной системы оценивания. Допустимые значения: %', 
             p_final_grade_value, v_allowed_values;
     END IF;
     
     -- Проверка семестра
     IF p_semester <= 0 THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Номер семестра должен быть положительным';
     END IF;
     
@@ -614,8 +627,7 @@ BEGIN
     RETURN v_grade_id;
 EXCEPTION
     WHEN OTHERS THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'register_final_grade');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE;
 END;
 $$;
@@ -642,12 +654,31 @@ DECLARE
     v_student_exists BOOLEAN;
     v_student_status public.student_status_enum;
     v_document_exists BOOLEAN;
+    v_current_role VARCHAR(30);
+    v_call_id INT;
 BEGIN
+    -- Получение роли, от которой могла быть вызвана функция
+    SELECT m.rolname as role_name
+    INTO v_current_role
+    FROM pg_user u 
+    JOIN pg_auth_members am ON u.usesysid = am.member
+    JOIN pg_roles m ON am.roleid = m.oid
+    WHERE u.usename = session_user
+        AND has_function_privilege(m.rolname, 'app.add_student_document(
+        INT,
+        public.document_type_enum,
+        VARCHAR(20),
+        VARCHAR(50),
+        DATE,
+        TEXT
+    )', 'EXECUTE')
+    LIMIT 1;
+
     -- Логирование вызова
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'add_student_document',
-        session_user,
+        v_current_role,
         jsonb_build_object(
             'student_id', p_student_id,
             'document_type', p_document_type,
@@ -657,7 +688,7 @@ BEGIN
             'issuing_authority', p_issuing_authority
         ),
         true
-    );
+    ) RETURNING call_id INTO v_call_id;
     
     -- Проверка существования студента
     SELECT EXISTS(SELECT 1 FROM app.students WHERE student_id = p_student_id), status
@@ -665,22 +696,19 @@ BEGIN
     FROM app.students WHERE student_id = p_student_id;
     
     IF NOT v_student_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'add_student_document');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
     END IF;
     
     -- Проверка статуса студента
     IF v_student_status = 'Отчислен' THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'add_student_document');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Нельзя добавлять документы отчисленному студенту';
     END IF;
     
     -- Валидация номера документа
     IF p_document_number IS NULL THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'add_student_document');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Номер документа обязателен';
     END IF;
     
@@ -693,8 +721,7 @@ BEGIN
     ) INTO v_document_exists;
     
     IF v_document_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'add_student_document');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Документ типа "%" с номером % уже зарегистрирован в системе', 
             p_document_type, p_document_number;
     END IF;
@@ -705,8 +732,7 @@ BEGIN
         WHERE student_id = p_student_id 
         AND document_type = p_document_type
     ) THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'add_student_document');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'У студента уже есть документ типа "%"', p_document_type;
     END IF;
     
@@ -722,8 +748,7 @@ BEGIN
     RETURN v_document_id;
 EXCEPTION
     WHEN OTHERS THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'add_student_document');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE;
 END;
 $$;
@@ -752,12 +777,31 @@ DECLARE
     v_group_name VARCHAR(20);
     v_admission_year INT;
     v_student_count INT;
+    v_current_role VARCHAR(30);
+    v_call_id INT;
 BEGIN
+    -- Получение роли, от которой могла быть вызвана функция
+    SELECT m.rolname as role_name
+    INTO v_current_role
+    FROM pg_user u 
+    JOIN pg_auth_members am ON u.usesysid = am.member
+    JOIN pg_roles m ON am.roleid = m.oid
+    WHERE u.usename = session_user
+        AND has_function_privilege(m.rolname, 'app.enroll_student(
+        VARCHAR(50),
+        VARCHAR(50), 
+        VARCHAR(50),
+        VARCHAR(255),
+        VARCHAR(20),
+        INT
+    )', 'EXECUTE')
+    LIMIT 1;
+
     -- Логирование вызова
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'enroll_student',
-        session_user,
+        v_current_role,
         jsonb_build_object(
             'last_name', p_last_name,
             'first_name', p_first_name,
@@ -767,33 +811,29 @@ BEGIN
             'group_id', p_group_id
         ),
         true
-    );
+    ) RETURNING call_id INTO v_call_id;
     
     -- Валидация обязательных полей
     IF p_last_name IS NULL OR p_first_name IS NULL THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'enroll_student');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Фамилия и имя студента обязательны';
     END IF;
     
     IF p_group_id IS NULL THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'enroll_student');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'ID группы обязателен';
     END IF;
     
     -- Проверка существования группы
     SELECT EXISTS(SELECT 1 FROM ref.study_groups WHERE group_id = p_group_id) INTO v_group_exists;
     IF NOT v_group_exists THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'enroll_student');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Группа с ID % не найдена', p_group_id;
     END IF;
     
     -- Проверка уникальности email
     IF p_email IS NOT NULL AND EXISTS(SELECT 1 FROM app.students WHERE email = p_email) THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'enroll_student');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Студент с email % уже существует', p_email;
     END IF;
     
@@ -804,8 +844,7 @@ BEGIN
     -- Проверка количества студентов в группе (максимум 30)
     SELECT COUNT(*) INTO v_student_count FROM app.students WHERE group_id = p_group_id;
     IF v_student_count >= 30 THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'enroll_student');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE EXCEPTION 'Группа % переполнена. Максимальное количество студентов: 30', v_group_name;
     END IF;
     
@@ -828,8 +867,7 @@ BEGIN
     RETURN v_new_student_id;
 EXCEPTION
     WHEN OTHERS THEN
-        UPDATE audit.function_calls SET success = false 
-        WHERE call_id = (SELECT MAX(call_id) FROM audit.function_calls WHERE function_name = 'enroll_student');
+        UPDATE audit.function_calls SET success = false WHERE call_id = v_call_id;
         RAISE;
 END;
 $$;
