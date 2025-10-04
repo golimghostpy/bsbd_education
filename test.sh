@@ -313,103 +313,6 @@ sudo docker exec -i postgres psql -U postgres -d education_db -c "
     ALTER TABLE app.class_schedule DROP CONSTRAINT IF EXISTS chk_class_time;
 " 2>&1
 
-# ТЕСТ CHECK ОГРАНИЧЕНИЯ
-echo -e "${BLUE}=== ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ CHECK ОГРАНИЧЕНИЯ ===${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "
-    -- Добавляем CHECK ограничение
-    ALTER TABLE app.class_schedule 
-    ADD CONSTRAINT chk_class_time 
-    CHECK (end_time > start_time);
-
-    -- ТЕСТ с замером времени ВНУТРИ БД
-    DO \$\$
-    DECLARE
-        start_time TIMESTAMP;
-        end_time INTERVAL;
-        i INTEGER;
-        success_count INTEGER := 0;
-        error_count INTEGER := 0;
-        test_start TIME;
-        test_end TIME;
-        test_group_id INT;
-        test_subject_id INT;
-        test_teacher_id INT;
-    BEGIN
-        -- Получаем существующие ID для валидных внешних ключей
-        SELECT group_id INTO test_group_id FROM ref.study_groups LIMIT 1;
-        SELECT subject_id INTO test_subject_id FROM ref.subjects LIMIT 1;
-        SELECT teacher_id INTO test_teacher_id FROM app.teachers LIMIT 1;
-        
-        -- СТАРТ замера времени ВНУТРИ БД
-        start_time := clock_timestamp();
-        
-        FOR i IN 1..10000 LOOP
-            -- Генерируем тестовые данные: 20% невалидных, 80% валидных
-            IF i % 5 = 0 THEN
-                -- Невалидные данные: окончание раньше начала
-                test_start := '14:00'::time;
-                test_end := '10:00'::time;
-            ELSE
-                -- Валидные данные
-                test_start := '08:00'::time + (((i % 480) * 5) || ' minutes')::interval;
-                test_end := test_start + '1 hour 30 minutes'::interval;
-            END IF;
-            
-            BEGIN
-                INSERT INTO app.class_schedule (
-                    group_id, subject_id, teacher_id, week_number, 
-                    day_of_week, start_time, end_time, classroom, 
-                    building_number, lesson_type
-                ) VALUES (
-                    test_group_id,
-                    test_subject_id, 
-                    test_teacher_id,
-                    (i % 7) + 1,
-                    CASE (i % 6) + 1 
-                        WHEN 1 THEN 'Понедельник'::day_of_week_enum
-                        WHEN 2 THEN 'Вторник'::day_of_week_enum
-                        WHEN 3 THEN 'Среда'::day_of_week_enum
-                        WHEN 4 THEN 'Четверг'::day_of_week_enum
-                        WHEN 5 THEN 'Пятница'::day_of_week_enum
-                        ELSE 'Суббота'::day_of_week_enum
-                    END,
-                    test_start,
-                    test_end,
-                    '101',
-                    '1',
-                    CASE (i % 3) + 1
-                        WHEN 1 THEN 'Лекция'::lesson_type_enum
-                        WHEN 2 THEN 'Практика'::lesson_type_enum
-                        ELSE 'Лабораторная'::lesson_type_enum
-                    END
-                );
-                success_count := success_count + 1;
-            EXCEPTION 
-                WHEN check_violation THEN
-                    error_count := error_count + 1;
-                WHEN OTHERS THEN
-                    error_count := error_count + 1;
-            END;
-        END LOOP;
-        
-        -- СТОП замера времени ВНУТРИ БД
-        end_time := clock_timestamp() - start_time;
-        
-        RAISE NOTICE '=== РЕЗУЛЬТАТЫ CHECK ===';
-        RAISE NOTICE 'Успешных вставок: %', success_count;
-        RAISE NOTICE 'Ошибок: %', error_count;
-        RAISE NOTICE 'Время выполнения: %', end_time;
-        
-        -- Очистка тестовых данных
-        DELETE FROM app.class_schedule WHERE classroom = '101' AND building_number = '1';
-    END \$\$;
-
-    -- Удаляем CHECK для теста триггера
-    ALTER TABLE app.class_schedule DROP CONSTRAINT chk_class_time;
-" 2>&1
-
-echo ""
-
 # ТЕСТ ТРИГГЕРА (ТОЧНО ТАКОЙ ЖЕ УСЛОВИЕ)
 echo -e "${BLUE}=== ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ TRIGGER (ТОЧНО ТАКОЕ ЖЕ УСЛОВИЕ) ===${NC}"
 sudo docker exec -i postgres psql -U postgres -d education_db -c "
@@ -515,15 +418,110 @@ sudo docker exec -i postgres psql -U postgres -d education_db -c "
         -- Очистка тестовых данных
         DELETE FROM app.class_schedule WHERE classroom = '101' AND building_number = '1';
     END \$\$;
+    
+    -- Удаляем триггер
+    DROP TRIGGER IF EXISTS trg_class_time_check ON app.class_schedule;
+    DROP FUNCTION IF EXISTS app.trg_check_class_time();
 " 2>&1
+
+# ТЕСТ CHECK ОГРАНИЧЕНИЯ
+echo -e "${BLUE}=== ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ CHECK ОГРАНИЧЕНИЯ ===${NC}"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+    -- Добавляем CHECK ограничение
+    ALTER TABLE app.class_schedule 
+    ADD CONSTRAINT chk_class_time 
+    CHECK (end_time > start_time);
+
+    -- ТЕСТ с замером времени ВНУТРИ БД
+    DO \$\$
+    DECLARE
+        start_time TIMESTAMP;
+        end_time INTERVAL;
+        i INTEGER;
+        success_count INTEGER := 0;
+        error_count INTEGER := 0;
+        test_start TIME;
+        test_end TIME;
+        test_group_id INT;
+        test_subject_id INT;
+        test_teacher_id INT;
+    BEGIN
+        -- Получаем существующие ID для валидных внешних ключей
+        SELECT group_id INTO test_group_id FROM ref.study_groups LIMIT 1;
+        SELECT subject_id INTO test_subject_id FROM ref.subjects LIMIT 1;
+        SELECT teacher_id INTO test_teacher_id FROM app.teachers LIMIT 1;
+        
+        -- СТАРТ замера времени ВНУТРИ БД
+        start_time := clock_timestamp();
+        
+        FOR i IN 1..10000 LOOP
+            -- Генерируем тестовые данные: 20% невалидных, 80% валидных
+            IF i % 5 = 0 THEN
+                -- Невалидные данные: окончание раньше начала
+                test_start := '14:00'::time;
+                test_end := '10:00'::time;
+            ELSE
+                -- Валидные данные
+                test_start := '08:00'::time + (((i % 480) * 5) || ' minutes')::interval;
+                test_end := test_start + '1 hour 30 minutes'::interval;
+            END IF;
+            
+            BEGIN
+                INSERT INTO app.class_schedule (
+                    group_id, subject_id, teacher_id, week_number, 
+                    day_of_week, start_time, end_time, classroom, 
+                    building_number, lesson_type
+                ) VALUES (
+                    test_group_id,
+                    test_subject_id, 
+                    test_teacher_id,
+                    (i % 7) + 1,
+                    CASE (i % 6) + 1 
+                        WHEN 1 THEN 'Понедельник'::day_of_week_enum
+                        WHEN 2 THEN 'Вторник'::day_of_week_enum
+                        WHEN 3 THEN 'Среда'::day_of_week_enum
+                        WHEN 4 THEN 'Четверг'::day_of_week_enum
+                        WHEN 5 THEN 'Пятница'::day_of_week_enum
+                        ELSE 'Суббота'::day_of_week_enum
+                    END,
+                    test_start,
+                    test_end,
+                    '101',
+                    '1',
+                    CASE (i % 3) + 1
+                        WHEN 1 THEN 'Лекция'::lesson_type_enum
+                        WHEN 2 THEN 'Практика'::lesson_type_enum
+                        ELSE 'Лабораторная'::lesson_type_enum
+                    END
+                );
+                success_count := success_count + 1;
+            EXCEPTION 
+                WHEN check_violation THEN
+                    error_count := error_count + 1;
+            END;
+        END LOOP;
+        
+        -- СТОП замера времени ВНУТРИ БД
+        end_time := clock_timestamp() - start_time;
+        
+        RAISE NOTICE '=== РЕЗУЛЬТАТЫ CHECK ===';
+        RAISE NOTICE 'Успешных вставок: %', success_count;
+        RAISE NOTICE 'Ошибок: %', error_count;
+        RAISE NOTICE 'Время выполнения: %', end_time;
+        
+        -- Очистка тестовых данных
+        DELETE FROM app.class_schedule WHERE classroom = '101' AND building_number = '1';
+    END \$\$;
+
+    -- Удаляем CHECK для теста триггера
+    ALTER TABLE app.class_schedule DROP CONSTRAINT chk_class_time;
+" 2>&1
+
+echo ""
 
 # ФИНАЛЬНАЯ ОЧИСТКА
 echo -e "${BLUE}=== ВОССТАНОВЛЕНИЕ ИСХОДНОГО СОСТОЯНИЯ ===${NC}"
 sudo docker exec -i postgres psql -U postgres -d education_db -c "
-    -- Удаляем триггер
-    DROP TRIGGER IF EXISTS trg_class_time_check ON app.class_schedule;
-    DROP FUNCTION IF EXISTS app.trg_check_class_time();
-    
     -- Восстанавливаем CHECK ограничение (продакшен-версия)
     ALTER TABLE app.class_schedule 
     ADD CONSTRAINT chk_class_time 
