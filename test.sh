@@ -279,6 +279,7 @@ echo -e "${PURPLE}--- Неудачное выполнение (без прав) 
 sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
 check_function "SELECT app.enroll_student('Петров', 'Иван', 'Сергеевич', 'petrov_ivan@student.ru', '+7-900-300-01-02', 2);" "enroll_student: отсутствуют права app_writer" "error"
 sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+check_function "SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex@student.ru', '+7-900-300-01-01', 1);" "enroll_student: почта уже существует" "error"
 
 # 2. Тестирование функции register_final_grade
 echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ register_final_grade ===${NC}"
@@ -290,6 +291,7 @@ echo -e "${PURPLE}--- Неудачное выполнение (без прав) 
 sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
 check_function "SELECT app.register_final_grade(2, 3, 2, 1, '5', 1);" "register_final_grade: отсутствуют права app_writer" "error"
 sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+check_function "SELECT app.register_final_grade(1, 2, 1, 1, 'abc', 1);" "register_final_grade: неправильная оценка" "error"
 
 # 3. Тестирование функции add_student_document
 echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ add_student_document ===${NC}"
@@ -301,6 +303,7 @@ echo -e "${PURPLE}--- Неудачное выполнение (без прав) 
 sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
 check_function "SELECT app.add_student_document(7, 'СНИЛС', NULL, '098-765-432-02', '2023-08-20', 'ПФР России');" "add_student_document: отсутствуют права app_writer" "error"
 sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+check_function "SELECT app.add_student_document(6, 'ИНН', NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: такой тип документа у студента уже есть" "error"
 
 echo -e "${YELLOW}=== ТЕСТИРОВАНИЕ CHECK vs TRIGGER ДЛЯ РАСПИСАНИЯ ЗАНЯТИЙ (10k записей) ===${NC}"
 echo ""
@@ -362,7 +365,7 @@ sudo docker exec -i postgres psql -U postgres -d education_db -c "
         
         FOR i IN 1..10000 LOOP
             -- ТОЧНО ТЕ ЖЕ САМЫЕ тестовые данные для честного сравнения
-            IF i % 5 = 0 THEN
+            IF i % 3 = 0 THEN
                 -- Невалидные данные: окончание раньше начала
                 test_start := '14:00'::time;
                 test_end := '10:00'::time;
@@ -418,7 +421,7 @@ sudo docker exec -i postgres psql -U postgres -d education_db -c "
         -- Очистка тестовых данных
         DELETE FROM app.class_schedule WHERE classroom = '101' AND building_number = '1';
     END \$\$;
-    
+
     -- Удаляем триггер
     DROP TRIGGER IF EXISTS trg_class_time_check ON app.class_schedule;
     DROP FUNCTION IF EXISTS app.trg_check_class_time();
@@ -456,7 +459,7 @@ sudo docker exec -i postgres psql -U postgres -d education_db -c "
         
         FOR i IN 1..10000 LOOP
             -- Генерируем тестовые данные: 20% невалидных, 80% валидных
-            IF i % 5 = 0 THEN
+            IF i % 3 = 0 THEN
                 -- Невалидные данные: окончание раньше начала
                 test_start := '14:00'::time;
                 test_end := '10:00'::time;
