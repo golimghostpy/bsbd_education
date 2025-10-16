@@ -98,10 +98,26 @@ CREATE TYPE day_of_week_enum AS ENUM ('Понедельник', 'Вторник'
 CREATE TYPE lesson_type_enum AS ENUM ('Лекция', 'Практика', 'Лабораторная');
 CREATE TYPE document_type_enum AS ENUM ('Паспорт', 'Аттестат', 'Диплом', 'Мед. справка', 'ИНН', 'СНИЛС', 'Другое');
 
--- 1. Схема ref
+-- 1. Схема ref (остались только дисциплины и типы оценок)
 
--- 1.1. Учебные заведения
-CREATE TABLE ref.educational_institutions (
+-- 1.1. Дисциплины
+CREATE TABLE ref.subjects (
+    subject_id SERIAL PRIMARY KEY,
+    subject_name VARCHAR(100) NOT NULL,
+    description TEXT
+);
+
+-- 1.2. Типы итоговых оценок
+CREATE TABLE ref.final_grade_types (
+    final_grade_type_id SERIAL PRIMARY KEY,
+    grade_system_name VARCHAR(50) NOT NULL,
+    allowed_values VARCHAR(255) NOT NULL
+);
+
+-- 2. Схема app (все основные таблицы)
+
+-- 2.1. Учебные заведения
+CREATE TABLE app.educational_institutions (
     institution_id SERIAL PRIMARY KEY,
     institution_name VARCHAR(200) NOT NULL UNIQUE,
     short_name VARCHAR(20) NOT NULL,
@@ -109,51 +125,35 @@ CREATE TABLE ref.educational_institutions (
     rector_id INT -- FK добавлен после
 );
 
--- 1.2. Факультеты/Институты
-CREATE TABLE ref.faculties (
+-- 2.2. Факультеты/Институты
+CREATE TABLE app.faculties (
     faculty_id SERIAL PRIMARY KEY,
     faculty_name VARCHAR(100) NOT NULL,
     dean_id INT, -- FK добавлен после
     institution_id INT NOT NULL,
-    FOREIGN KEY (institution_id) REFERENCES ref.educational_institutions(institution_id)
+    FOREIGN KEY (institution_id) REFERENCES app.educational_institutions(institution_id)
 );
 
--- 1.3. Кафедры
-CREATE TABLE ref.departments (
+-- 2.3. Кафедры
+CREATE TABLE app.departments (
     department_id SERIAL PRIMARY KEY,
     department_name VARCHAR(100) NOT NULL,
     head_of_department_id INT, -- FK добавлен после
     faculty_id INT NOT NULL,
-    FOREIGN KEY (faculty_id) REFERENCES ref.faculties(faculty_id)
+    FOREIGN KEY (faculty_id) REFERENCES app.faculties(faculty_id)
 );
 
--- 1.4. Учебные группы
-CREATE TABLE ref.study_groups (
+-- 2.4. Учебные группы
+CREATE TABLE app.study_groups (
     group_id SERIAL PRIMARY KEY,
     group_name VARCHAR(20) NOT NULL,
     admission_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM CURRENT_DATE),
     faculty_id INT NOT NULL,
     UNIQUE (group_name, admission_year),
-    FOREIGN KEY (faculty_id) REFERENCES ref.faculties(faculty_id)
+    FOREIGN KEY (faculty_id) REFERENCES app.faculties(faculty_id)
 );
 
--- 1.5. Дисциплины
-CREATE TABLE ref.subjects (
-    subject_id SERIAL PRIMARY KEY,
-    subject_name VARCHAR(100) NOT NULL,
-    description TEXT
-);
-
--- 1.6. Типы итоговых оценок
-CREATE TABLE ref.final_grade_types (
-    final_grade_type_id SERIAL PRIMARY KEY,
-    grade_system_name VARCHAR(50) NOT NULL,
-    allowed_values VARCHAR(255) NOT NULL
-);
-
--- 2. Схема app
-
--- 2.1. Преподаватели
+-- 2.5. Преподаватели
 CREATE TABLE app.teachers (
     teacher_id SERIAL PRIMARY KEY,
     last_name VARCHAR(50) NOT NULL,
@@ -165,7 +165,7 @@ CREATE TABLE app.teachers (
     phone_number VARCHAR(20)
 );
 
--- 2.2. Студенты
+-- 2.6. Студенты
 CREATE TABLE app.students (
     student_id SERIAL PRIMARY KEY,
     last_name VARCHAR(50) NOT NULL,
@@ -176,10 +176,10 @@ CREATE TABLE app.students (
     phone_number VARCHAR(20),
     group_id INT NOT NULL,
     status student_status_enum NOT NULL DEFAULT 'Обучается',
-    FOREIGN KEY (group_id) REFERENCES ref.study_groups(group_id)
+    FOREIGN KEY (group_id) REFERENCES app.study_groups(group_id)
 );
 
--- 2.3. Связь Преподаватель-Кафедра
+-- 2.7. Связь Преподаватель-Кафедра
 CREATE TABLE app.teacher_departments (
     teacher_id INT NOT NULL,
     department_id INT NOT NULL,
@@ -187,10 +187,10 @@ CREATE TABLE app.teacher_departments (
     position VARCHAR(100) NOT NULL,
     PRIMARY KEY (teacher_id, department_id),
     FOREIGN KEY (teacher_id) REFERENCES app.teachers(teacher_id),
-    FOREIGN KEY (department_id) REFERENCES ref.departments(department_id)
+    FOREIGN KEY (department_id) REFERENCES app.departments(department_id)
 );
 
--- 2.4. Учебные планы
+-- 2.8. Учебные планы
 CREATE TABLE app.academic_plans (
     plan_id SERIAL PRIMARY KEY,
     group_id INT NOT NULL,
@@ -201,11 +201,11 @@ CREATE TABLE app.academic_plans (
     practice_hours INT,
     control_type control_type_enum NOT NULL,
     UNIQUE (group_id, subject_id, semester),
-    FOREIGN KEY (group_id) REFERENCES ref.study_groups(group_id),
+    FOREIGN KEY (group_id) REFERENCES app.study_groups(group_id),
     FOREIGN KEY (subject_id) REFERENCES ref.subjects(subject_id)
 );
 
--- 2.5. Итоговые оценки
+-- 2.9. Итоговые оценки
 CREATE TABLE app.final_grades (
     final_grade_id SERIAL PRIMARY KEY,
     student_id INT NOT NULL,
@@ -221,7 +221,7 @@ CREATE TABLE app.final_grades (
     FOREIGN KEY (final_grade_type_id) REFERENCES ref.final_grade_types(final_grade_type_id)
 );
 
--- 2.6. Промежуточные оценки
+-- 2.10. Промежуточные оценки
 CREATE TABLE app.interim_grades (
     interim_grade_id SERIAL PRIMARY KEY,
     student_id INT NOT NULL,
@@ -236,7 +236,7 @@ CREATE TABLE app.interim_grades (
     FOREIGN KEY (teacher_id) REFERENCES app.teachers(teacher_id)
 );
 
--- 2.7. Расписание занятий
+-- 2.11. Расписание занятий
 CREATE TABLE app.class_schedule (
     schedule_id SERIAL PRIMARY KEY,
     group_id INT NOT NULL,
@@ -249,12 +249,12 @@ CREATE TABLE app.class_schedule (
     classroom VARCHAR(20),
     building_number VARCHAR(10) NOT NULL,
     lesson_type lesson_type_enum NOT NULL,
-    FOREIGN KEY (group_id) REFERENCES ref.study_groups(group_id),
+    FOREIGN KEY (group_id) REFERENCES app.study_groups(group_id),
     FOREIGN KEY (subject_id) REFERENCES ref.subjects(subject_id),
     FOREIGN KEY (teacher_id) REFERENCES app.teachers(teacher_id)
 );
 
--- 2.8. Документы студентов
+-- 2.12. Документы студентов
 CREATE TABLE app.student_documents (
     document_id SERIAL PRIMARY KEY,
     student_id INT NOT NULL,
@@ -276,6 +276,7 @@ CREATE TABLE audit.login_log (
     client_ip INET NOT NULL -- Тип INET для хранения IPv4 и IPv6 адресов
 );
 
+--3.2 Лог вызова функций
 CREATE TABLE audit.function_calls (
     call_id SERIAL PRIMARY KEY,
     call_time TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -288,17 +289,17 @@ CREATE TABLE audit.function_calls (
 -- Добавление внешних ключей, которые ссылаются на таблицу teachers
 
 -- Ректор учебного заведения
-ALTER TABLE ref.educational_institutions 
+ALTER TABLE app.educational_institutions 
 ADD CONSTRAINT fk_institutions_rector 
 FOREIGN KEY (rector_id) REFERENCES app.teachers(teacher_id);
 
 -- Декан факультета
-ALTER TABLE ref.faculties 
+ALTER TABLE app.faculties 
 ADD CONSTRAINT fk_faculties_dean 
 FOREIGN KEY (dean_id) REFERENCES app.teachers(teacher_id);
 
 -- Заведующий кафедрой
-ALTER TABLE ref.departments 
+ALTER TABLE app.departments 
 ADD CONSTRAINT fk_departments_head 
 FOREIGN KEY (head_of_department_id) REFERENCES app.teachers(teacher_id);
 
@@ -340,14 +341,14 @@ INSERT INTO app.teachers (last_name, first_name, patronymic, academic_degree, ac
 
 --заполнение таблиц-справочников
 
-INSERT INTO ref.educational_institutions (institution_id, institution_name, short_name, legal_address, rector_id) VALUES
+INSERT INTO app.educational_institutions (institution_id, institution_name, short_name, legal_address, rector_id) VALUES
 (1, 'Национальный исследовательский университет "Высшая школа экономики"', 'НИУ ВШЭ', 'г. Москва, ул. Мясницкая, д. 20', 1),
 (2, 'Московский государственный университет имени М.В. Ломоносова', 'МГУ', 'г. Москва, Ленинские горы, д. 1', 4),
 (3, 'Московский физико-технический институт', 'МФТИ', 'г. Москва, ул. Климентовский пер, д. 1', 9),
 (4, 'Российский университет дружбы народов', 'РУДН', 'г. Москва, ул. Миклухо-Маклая, д. 6', 5),
 (5, 'Новосибирский государственный технический университет', 'НГТУ', 'г. Новосибирск, пр-т К.Маркса, д. 20', 7);
 
-INSERT INTO ref.faculties (faculty_id, faculty_name, dean_id, institution_id) VALUES
+INSERT INTO app.faculties (faculty_id, faculty_name, dean_id, institution_id) VALUES
 (1, 'Факультет компьютерных наук', 2, 1),
 (2, 'Экономический факультет', 3, 1),
 (3, 'Механико-математический факультет', 6, 2),
@@ -359,7 +360,7 @@ INSERT INTO ref.faculties (faculty_id, faculty_name, dean_id, institution_id) VA
 (9, 'Факультет информатики', 9, 5),
 (10, 'Факультет прикладной математики', 5, 3);
 
-INSERT INTO ref.departments (department_id, department_name, head_of_department_id, faculty_id) VALUES
+INSERT INTO app.departments (department_id, department_name, head_of_department_id, faculty_id) VALUES
 (1, 'Кафедра программной инженерии', 1, 1),
 (2, 'Кафедра анализа данных', 2, 1),
 (3, 'Кафедра экономической теории', 3, 2),
@@ -371,7 +372,7 @@ INSERT INTO ref.departments (department_id, department_name, head_of_department_
 (9, 'Кафедра робототехнических систем', 9, 8),
 (10, 'Кафедра искусственного интеллекта', 10, 9);
 
-INSERT INTO ref.study_groups (group_id, group_name, admission_year, faculty_id) VALUES
+INSERT INTO app.study_groups (group_id, group_name, admission_year, faculty_id) VALUES
 (1, 'АБ-320', 2023, 1),
 (2, 'ПИ-02', 2023, 1),
 (3, 'ЭК-01', 2023, 2),
@@ -515,8 +516,8 @@ CREATE EVENT TRIGGER login_audit_tg
 ON login
 EXECUTE FUNCTION audit.login_audit();
 
-
-CREATE OR REPLACE FUNCTION audit.func_execute_log(
+--Логирование вызова функций с ошибкой
+CREATE OR REPLACE FUNCTION audit.func_error_log(
     p_func_name VARCHAR(100),
     p_caller_role VARCHAR(100),
     p_input_params JSONB,
@@ -558,39 +559,6 @@ DECLARE
     v_current_role VARCHAR(30);
     v_call_id INT;
 BEGIN
-    -- Получение роли, от которой могла быть вызвана функция
-    SELECT m.rolname as role_name
-    INTO v_current_role
-    FROM pg_user u 
-    JOIN pg_auth_members am ON u.usesysid = am.member
-    JOIN pg_roles m ON am.roleid = m.oid
-    WHERE u.usename = session_user
-        AND has_function_privilege(m.rolname, 'app.register_final_grade(
-        INT,
-        INT, 
-        INT,
-        INT,
-        VARCHAR(10),
-        INT
-    )', 'EXECUTE')
-    LIMIT 1;
-
-    -- Логирование вызова
-    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
-    VALUES (
-        'register_final_grade',
-        v_current_role,
-        jsonb_build_object(
-            'student_id', p_student_id,
-            'subject_id', p_subject_id,
-            'teacher_id', p_teacher_id,
-            'final_grade_type_id', p_final_grade_type_id,
-            'final_grade_value', p_final_grade_value,
-            'semester', p_semester
-        ),
-        true
-    ) RETURNING call_id INTO v_call_id;
-    
     --Проверка существования id
     SELECT EXISTS(SELECT 1 FROM app.students WHERE student_id = p_student_id) INTO v_student_exists;
     SELECT EXISTS(SELECT 1 FROM app.teachers WHERE teacher_id = p_teacher_id) INTO v_teacher_exists;
@@ -634,6 +602,39 @@ BEGIN
         p_final_grade_value, p_semester
     ) RETURNING final_grade_id INTO v_grade_id;
     
+    -- Получение роли, от которой могла быть вызвана функция
+    SELECT m.rolname as role_name
+    INTO v_current_role
+    FROM pg_user u 
+    JOIN pg_auth_members am ON u.usesysid = am.member
+    JOIN pg_roles m ON am.roleid = m.oid
+    WHERE u.usename = session_user
+        AND has_function_privilege(m.rolname, 'app.register_final_grade(
+        INT,
+        INT, 
+        INT,
+        INT,
+        VARCHAR(10),
+        INT
+    )', 'EXECUTE')
+    LIMIT 1;
+
+    -- Логирование вызова
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'register_final_grade',
+        v_current_role,
+        jsonb_build_object(
+            'student_id', p_student_id,
+            'subject_id', p_subject_id,
+            'teacher_id', p_teacher_id,
+            'final_grade_type_id', p_final_grade_type_id,
+            'final_grade_value', p_final_grade_value,
+            'semester', p_semester
+        ),
+        true
+    ) RETURNING call_id INTO v_call_id;
+    
     RETURN v_grade_id;
 EXCEPTION
     WHEN OTHERS THEN
@@ -666,39 +667,6 @@ DECLARE
     v_current_role VARCHAR(30);
     v_call_id INT;
 BEGIN
-    -- Получение роли, от которой могла быть вызвана функция
-    SELECT m.rolname as role_name
-    INTO v_current_role
-    FROM pg_user u 
-    JOIN pg_auth_members am ON u.usesysid = am.member
-    JOIN pg_roles m ON am.roleid = m.oid
-    WHERE u.usename = session_user
-        AND has_function_privilege(m.rolname, 'app.add_student_document(
-        INT,
-        public.document_type_enum,
-        VARCHAR(20),
-        VARCHAR(50),
-        DATE,
-        TEXT
-    )', 'EXECUTE')
-    LIMIT 1;
-
-    -- Логирование вызова
-    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
-    VALUES (
-        'add_student_document',
-        v_current_role,
-        jsonb_build_object(
-            'student_id', p_student_id,
-            'document_type', p_document_type,
-            'document_series', p_document_series,
-            'document_number', p_document_number,
-            'issue_date', p_issue_date,
-            'issuing_authority', p_issuing_authority
-        ),
-        true
-    ) RETURNING call_id INTO v_call_id;
-    
     -- Проверка существования студента
     SELECT EXISTS(SELECT 1 FROM app.students WHERE student_id = p_student_id), status
     INTO v_student_exists, v_student_status
@@ -749,6 +717,39 @@ BEGIN
         p_issue_date, p_issuing_authority
     ) RETURNING document_id INTO v_document_id;
     
+    -- Получение роли, от которой могла быть вызвана функция
+    SELECT m.rolname as role_name
+    INTO v_current_role
+    FROM pg_user u 
+    JOIN pg_auth_members am ON u.usesysid = am.member
+    JOIN pg_roles m ON am.roleid = m.oid
+    WHERE u.usename = session_user
+        AND has_function_privilege(m.rolname, 'app.add_student_document(
+        INT,
+        public.document_type_enum,
+        VARCHAR(20),
+        VARCHAR(50),
+        DATE,
+        TEXT
+    )', 'EXECUTE')
+    LIMIT 1;
+
+    -- Логирование вызова
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'add_student_document',
+        v_current_role,
+        jsonb_build_object(
+            'student_id', p_student_id,
+            'document_type', p_document_type,
+            'document_series', p_document_series,
+            'document_number', p_document_number,
+            'issue_date', p_issue_date,
+            'issuing_authority', p_issuing_authority
+        ),
+        true
+    ) RETURNING call_id INTO v_call_id;
+
     RETURN v_document_id;
 EXCEPTION
     WHEN OTHERS THEN
@@ -783,6 +784,52 @@ DECLARE
     v_current_role VARCHAR(30);
     v_call_id INT;
 BEGIN
+    -- Валидация обязательных полей
+    IF p_last_name IS NULL OR p_first_name IS NULL THEN
+        RAISE EXCEPTION 'Фамилия и имя студента обязательны';
+    END IF;
+    
+    IF p_group_id IS NULL THEN
+        RAISE EXCEPTION 'ID группы обязателен';
+    END IF;
+    
+    -- Проверка существования группы
+    SELECT EXISTS(SELECT 1 FROM app.study_groups WHERE group_id = p_group_id) INTO v_group_exists;
+    IF NOT v_group_exists THEN
+        RAISE EXCEPTION 'Группа с ID % не найдена', p_group_id;
+    END IF;
+    
+    -- Проверка уникальности email
+    IF p_email IS NOT NULL AND EXISTS(SELECT 1 FROM app.students WHERE email = p_email) THEN
+        RAISE EXCEPTION 'Студент с email % уже существует', p_email;
+    END IF;
+    
+    -- Получение данных группы для генерации номера студенческого
+    SELECT group_name, admission_year INTO v_group_name, v_admission_year
+    FROM app.study_groups WHERE group_id = p_group_id;
+    
+    -- Проверка количества студентов в группе (максимум 30)
+    SELECT COUNT(*) INTO v_student_count FROM app.students WHERE group_id = p_group_id;
+    IF v_student_count >= 30 THEN
+        RAISE EXCEPTION 'Группа % переполнена. Максимальное количество студентов: 30', v_group_name;
+    END IF;
+    
+    -- Генерация номера студенческого билета
+    v_student_card_number := upper(substring(v_group_name from 1 for 3)) || 
+                            v_admission_year || '-' || 
+                            lpad((v_student_count + 1)::text, 3, '0');
+    
+    -- Зачисление студента
+    INSERT INTO app.students (
+        last_name, first_name, patronymic,
+        student_card_number, email, phone_number,
+        group_id, status
+    ) VALUES (
+        p_last_name, p_first_name, p_patronymic,
+        v_student_card_number, p_email, p_phone_number,
+        p_group_id, 'Обучается'
+    ) RETURNING student_id INTO v_new_student_id;
+    
     -- Получение роли, от которой могла быть вызвана функция
     SELECT m.rolname as role_name
     INTO v_current_role
@@ -815,53 +862,7 @@ BEGIN
         ),
         true
     ) RETURNING call_id INTO v_call_id;
-    
-    -- Валидация обязательных полей
-    IF p_last_name IS NULL OR p_first_name IS NULL THEN
-        RAISE EXCEPTION 'Фамилия и имя студента обязательны';
-    END IF;
-    
-    IF p_group_id IS NULL THEN
-        RAISE EXCEPTION 'ID группы обязателен';
-    END IF;
-    
-    -- Проверка существования группы
-    SELECT EXISTS(SELECT 1 FROM ref.study_groups WHERE group_id = p_group_id) INTO v_group_exists;
-    IF NOT v_group_exists THEN
-        RAISE EXCEPTION 'Группа с ID % не найдена', p_group_id;
-    END IF;
-    
-    -- Проверка уникальности email
-    IF p_email IS NOT NULL AND EXISTS(SELECT 1 FROM app.students WHERE email = p_email) THEN
-        RAISE EXCEPTION 'Студент с email % уже существует', p_email;
-    END IF;
-    
-    -- Получение данных группы для генерации номера студенческого
-    SELECT group_name, admission_year INTO v_group_name, v_admission_year
-    FROM ref.study_groups WHERE group_id = p_group_id;
-    
-    -- Проверка количества студентов в группе (максимум 30)
-    SELECT COUNT(*) INTO v_student_count FROM app.students WHERE group_id = p_group_id;
-    IF v_student_count >= 30 THEN
-        RAISE EXCEPTION 'Группа % переполнена. Максимальное количество студентов: 30', v_group_name;
-    END IF;
-    
-    -- Генерация номера студенческого билета
-    v_student_card_number := upper(substring(v_group_name from 1 for 3)) || 
-                            v_admission_year || '-' || 
-                            lpad((v_student_count + 1)::text, 3, '0');
-    
-    -- Зачисление студента
-    INSERT INTO app.students (
-        last_name, first_name, patronymic,
-        student_card_number, email, phone_number,
-        group_id, status
-    ) VALUES (
-        p_last_name, p_first_name, p_patronymic,
-        v_student_card_number, p_email, p_phone_number,
-        p_group_id, 'Обучается'
-    ) RETURNING student_id INTO v_new_student_id;
-    
+
     RETURN v_new_student_id;
 EXCEPTION
     WHEN OTHERS THEN
