@@ -1375,101 +1375,86 @@ INSERT INTO app.role_segments (role_name, segment_id) VALUES
 ('nstu_writer', 7),
 ('nstu_owner', 7);
 
--- Улучшенная функция get_current_segment_id
+-- Функция для получения segment_id из контекста (GUC или резервный путь)
 CREATE OR REPLACE FUNCTION app.get_current_segment_id()
-RETURNS INT
+RETURNS INTEGER
 LANGUAGE plpgsql
-STABLE
+SECURITY DEFINER
+SET search_path = 'app'
 AS $$
 DECLARE
-    v_segment_id INT;
-    v_setting_value TEXT;
-    v_role_segment_id INT;
+    v_segment_id_text TEXT;
+    v_segment_id INTEGER;
 BEGIN
-    -- Приоритет 1: Пытаемся получить segment_id из GUC (явно установленный контекст)
+    -- Пытаемся получить из GUC (основной способ)
     BEGIN
-        v_setting_value := current_setting('app.segment_id', true);
-        IF v_setting_value IS NOT NULL AND v_setting_value != '' AND v_setting_value ~ '^\d+$' THEN
-            RETURN v_setting_value::INT;
+        v_segment_id_text := current_setting('app.segment_id', true);
+        v_segment_id := v_segment_id_text::INTEGER;
+        
+        -- Проверяем что сегмент существует
+        IF NOT EXISTS (SELECT 1 FROM ref.segments WHERE segment_id = v_segment_id) THEN
+            RAISE EXCEPTION 'Сегмент с ID % не существует', v_segment_id;
         END IF;
+        
     EXCEPTION
-        WHEN undefined_object THEN
-            NULL; -- Настройка не установлена, продолжаем
+        WHEN OTHERS THEN
+            -- Если GUC не установлен, используем резервный путь через role_segments
+            SELECT lrs.segment_id INTO v_segment_id
+            FROM app.role_segments lrs
+            WHERE lrs.role_name = session_user
+            LIMIT 1;
+            
+            IF v_segment_id IS NULL THEN
+                -- Для административных ролей разрешаем доступ ко всем данным
+                IF pg_has_role(session_user, 'app_owner', 'MEMBER') OR
+                   pg_has_role(session_user, 'security_admin', 'MEMBER') OR
+                   pg_has_role(session_user, 'dml_admin', 'MEMBER') THEN
+                    RETURN NULL;
+                ELSE
+                    RAISE EXCEPTION 'Сегмент не определен. Используйте GUC app.segment_id или настройте app.role_segments для роли %', session_user;
+                END IF;
+            END IF;
     END;
     
-    -- Приоритет 2: Ищем по имени роли в таблице role_segments
-    SELECT segment_id INTO v_role_segment_id
-    FROM app.role_segments
-    WHERE role_name = current_user;
-    
-    IF v_role_segment_id IS NOT NULL THEN
-        RETURN v_role_segment_id;
-    END IF;
-    
-    -- Приоритет 3: Для административных ролей возвращаем NULL (доступ ко всем данным)
-    IF EXISTS(
-        SELECT 1 FROM pg_roles 
-        WHERE rolname = current_user 
-        AND (
-            rolname IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres')
-            OR rolsuper = true
-        )
-    ) THEN
-        RETURN NULL; -- NULL означает доступ ко всем сегментам
-    END IF;
-    
-    -- Если ничего не найдено, возвращаем -1 (нет доступа)
-    RETURN -1;
+    RETURN v_segment_id;
 END;
 $$;
 
--- Улучшенная функция check_segment_access
-CREATE OR REPLACE FUNCTION app.check_segment_access(p_segment_id INT)
+-- Функция для проверки доступа к сегменту
+CREATE OR REPLACE FUNCTION app.check_segment_access(p_segment_id INTEGER)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
-STABLE
+SECURITY DEFINER
+SET search_path = 'app'
 AS $$
 DECLARE
-    v_current_segment_id INT;
-    v_is_admin BOOLEAN;
+    v_current_segment_id INTEGER;
 BEGIN
-    -- Проверяем административные привилегии
-    SELECT EXISTS(
-        SELECT 1 FROM pg_roles 
-        WHERE rolname = current_user 
-        AND (
-            rolname IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres')
-            OR rolsuper = true
-            OR rolname LIKE '%_admin'
-        )
-    ) INTO v_is_admin;
-    
-    -- Административные роли имеют доступ ко всем данным
-    IF v_is_admin THEN
-        RETURN TRUE;
-    END IF;
-    
-    -- Получаем текущий segment_id
+    -- Получаем текущий сегмент из контекста
     v_current_segment_id := app.get_current_segment_id();
     
-    -- Если get_current_segment_id вернул -1, доступ запрещен
-    IF v_current_segment_id = -1 THEN
-        RETURN FALSE;
-    END IF;
-    
-    -- Если get_current_segment_id вернул NULL (админ), доступ разрешен
+    -- Если NULL - административная роль, доступ ко всем сегментам
     IF v_current_segment_id IS NULL THEN
         RETURN TRUE;
     END IF;
     
-    -- Для обычных ролей проверяем соответствие сегментов
-    RETURN v_current_segment_id = p_segment_id;
-EXCEPTION
-    WHEN OTHERS THEN
-        -- В случае ошибки запрещаем доступ (безопасный подход)
-        RETURN FALSE;
+    -- Проверяем доступ через GUC
+    IF v_current_segment_id = p_segment_id THEN
+        RETURN TRUE;
+    END IF;
+    
+    -- Проверяем доступ через role_segments (резервный путь)
+    IF EXISTS (
+        SELECT 1 FROM app.role_segments 
+        WHERE role_name = current_user AND segment_id = p_segment_id
+    ) THEN
+        RETURN TRUE;
+    END IF;
+    
+    RETURN FALSE;
 END;
 $$;
+
 
 -- Универсальная политика для SELECT
 CREATE POLICY select_policy ON app.educational_institutions
@@ -1514,32 +1499,32 @@ FOR SELECT USING (app.check_segment_access(segment_id));
 -- Политики для INSERT с проверкой сегмента
 CREATE POLICY insert_policy ON app.students
 FOR INSERT WITH CHECK (
-    app.check_segment_access(segment_id) AND 
     segment_id = app.get_current_segment_id()
+    AND app.check_segment_access(segment_id)
 );
 
 CREATE POLICY insert_policy ON app.teachers
 FOR INSERT WITH CHECK (
-    app.check_segment_access(segment_id) AND 
     segment_id = app.get_current_segment_id()
+    AND app.check_segment_access(segment_id)
 );
 
 CREATE POLICY insert_policy ON app.final_grades
 FOR INSERT WITH CHECK (
-    app.check_segment_access(segment_id) AND 
     segment_id = app.get_current_segment_id()
+    AND app.check_segment_access(segment_id)
 );
 
 CREATE POLICY insert_policy ON app.interim_grades
 FOR INSERT WITH CHECK (
-    app.check_segment_access(segment_id) AND 
     segment_id = app.get_current_segment_id()
+    AND app.check_segment_access(segment_id)
 );
 
 CREATE POLICY insert_policy ON app.student_documents
 FOR INSERT WITH CHECK (
-    app.check_segment_access(segment_id) AND 
     segment_id = app.get_current_segment_id()
+    AND app.check_segment_access(segment_id)
 );
 
 -- Политики для UPDATE
@@ -1568,96 +1553,70 @@ FOR DELETE USING (
     current_user LIKE '%_owner'
 );
 
--- SECURITY DEFINER функция для установки контекста сессии
 CREATE OR REPLACE FUNCTION app.set_session_ctx(
-    p_segment_id INT,
-    p_actor_id INT DEFAULT NULL
-)
-RETURNS VOID
-SECURITY DEFINER
-SET search_path = 'app, ref, public'
+    p_segment_id INTEGER,
+    p_actor_id INTEGER
+) RETURNS VOID
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, ref'
 AS $$
 DECLARE
-    v_role_segment_id INT;
-    v_has_access BOOLEAN;
-    v_actor_name TEXT;
+    v_has_access BOOLEAN := FALSE;
+    v_current_user_name TEXT;
 BEGIN
-    -- Проверяем существование сегмента
-    IF NOT EXISTS(SELECT 1 FROM ref.segments WHERE segment_id = p_segment_id) THEN
-        RAISE EXCEPTION 'Сегмент с ID % не существует', p_segment_id;
-    END IF;
+    -- Получаем реального пользователя
+    v_current_user_name := session_user;
     
-    -- Проверяем право доступа роли к сегменту
-    SELECT segment_id INTO v_role_segment_id
-    FROM app.role_segments
-    WHERE role_name = current_user;
-    
-    -- Административные роли имеют доступ ко всем сегментам
-    IF current_user IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres') THEN
+    -- ЕДИНСТВЕННАЯ ПРОВЕРКА: Роль имеет доступ к сегменту через role_segments
+    IF EXISTS (
+        SELECT 1 FROM app.role_segments 
+        WHERE role_name = v_current_user_name AND segment_id = p_segment_id
+    ) THEN
         v_has_access := TRUE;
-    ELSE
-        v_has_access := (v_role_segment_id IS NOT NULL AND v_role_segment_id = p_segment_id);
     END IF;
     
+    -- Для административных ролей - полный доступ
+    IF NOT v_has_access AND (
+        pg_has_role(v_current_user_name, 'app_owner', 'MEMBER') OR
+        pg_has_role(v_current_user_name, 'security_admin', 'MEMBER') OR
+        pg_has_role(v_current_user_name, 'dml_admin', 'MEMBER')
+    ) THEN
+        v_has_access := TRUE;
+    END IF;
+    
+    -- Если доступ не предоставлен - ошибка
     IF NOT v_has_access THEN
-        RAISE EXCEPTION 'Роль % не имеет доступа к сегменту %', current_user, p_segment_id;
+        RAISE EXCEPTION 'Доступ к сегменту % запрещен для роли %', 
+            p_segment_id, v_current_user_name;
     END IF;
     
-    -- Получаем имя актора если передан ID
-    IF p_actor_id IS NOT NULL THEN
-        SELECT CONCAT(last_name, ' ', first_name) INTO v_actor_name
-        FROM app.teachers WHERE teacher_id = p_actor_id;
-        
-        IF v_actor_name IS NULL THEN
-            SELECT CONCAT(last_name, ' ', first_name) INTO v_actor_name
-            FROM app.students WHERE student_id = p_actor_id;
-        END IF;
-        
-        IF v_actor_name IS NULL THEN
-            v_actor_name := 'Unknown';
-        END IF;
-    ELSE
-        v_actor_name := current_user;
-    END IF;
-    
-    -- Устанавливаем GUC параметры сессии
-    PERFORM set_config('app.segment_id', p_segment_id::text, false);
-    PERFORM set_config('app.actor_id', COALESCE(p_actor_id::text, '0'), false);
-    PERFORM set_config('app.actor_name', v_actor_name, false);
-    PERFORM set_config('app.session_start', to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS'), false);
+    -- Устанавливаем GUC параметры сессии (SET LOCAL - для текущей транзакции)
+    PERFORM set_config('app.segment_id', p_segment_id::TEXT, true);  -- true = LOCAL
     
     -- Логируем установку контекста
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
-        'set_session_ctx',
-        current_user,
-        jsonb_build_object(
-            'segment_id', p_segment_id,
-            'actor_id', p_actor_id,
-            'actor_name', v_actor_name,
-            'session_start', CURRENT_TIMESTAMP
-        ),
+        'set_session_ctx', 
+        v_current_user_name,
+        jsonb_build_object('segment_id', p_segment_id, 'actor_id', p_actor_id),
         true
     );
     
 EXCEPTION
     WHEN OTHERS THEN
-        -- Логируем ошибку
         INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
         VALUES (
-            'set_session_ctx',
-            current_user,
-            jsonb_build_object(
-                'segment_id', p_segment_id,
-                'actor_id', p_actor_id,
-                'error', SQLERRM
-            ),
+            'set_session_ctx', 
+            v_current_user_name,
+            jsonb_build_object('segment_id', p_segment_id, 'actor_id', p_actor_id),
             false
         );
         RAISE;
 END;
 $$;
+
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER, INTEGER) TO app_reader, app_writer, app_owner, dml_admin;
 
 -- Функция для получения текущего контекста
 CREATE OR REPLACE FUNCTION app.get_session_ctx()
