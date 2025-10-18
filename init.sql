@@ -852,7 +852,7 @@ $$;
 
 --SECURITY DEFINED functions
 
---Регистрация итоговой оценки
+-- 1. Функция регистрации итоговой оценки
 CREATE OR REPLACE FUNCTION app.register_final_grade(
     p_student_id INT,
     p_subject_id INT, 
@@ -863,31 +863,42 @@ CREATE OR REPLACE FUNCTION app.register_final_grade(
 )
 RETURNS INT
 SECURITY DEFINER
-SET search_path = 'app, public'
+SET search_path = 'app, ref, public'
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_grade_id INT;
-    v_student_exists BOOLEAN;
-    v_teacher_exists BOOLEAN;
+    v_student_segment_id INT;
+    v_teacher_segment_id INT;
     v_subject_exists BOOLEAN;
     v_grade_type_exists BOOLEAN;
     v_allowed_values VARCHAR(255);
-    v_current_role VARCHAR(30);
-    v_call_id INT;
 BEGIN
-    --Проверка существования id
-    SELECT EXISTS(SELECT 1 FROM app.students WHERE student_id = p_student_id) INTO v_student_exists;
-    SELECT EXISTS(SELECT 1 FROM app.teachers WHERE teacher_id = p_teacher_id) INTO v_teacher_exists;
+    -- Проверка существования и получение сегментов
+    SELECT segment_id INTO v_student_segment_id 
+    FROM app.students 
+    WHERE student_id = p_student_id;
+    
+    IF v_student_segment_id IS NULL THEN
+        RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
+    END IF;
+    
+    SELECT segment_id INTO v_teacher_segment_id 
+    FROM app.teachers 
+    WHERE teacher_id = p_teacher_id;
+    
+    IF v_teacher_segment_id IS NULL THEN
+        RAISE EXCEPTION 'Преподаватель с ID % не найден', p_teacher_id;
+    END IF;
+    
+    -- Проверка принадлежности к одному сегменту
+    IF v_student_segment_id != v_teacher_segment_id THEN
+        RAISE EXCEPTION 'Студент и преподаватель принадлежат разным сегментам данных';
+    END IF;
+    
     SELECT EXISTS(SELECT 1 FROM ref.subjects WHERE subject_id = p_subject_id) INTO v_subject_exists;
     SELECT EXISTS(SELECT 1 FROM ref.final_grade_types WHERE final_grade_type_id = p_final_grade_type_id) INTO v_grade_type_exists;
     
-    IF NOT v_student_exists THEN
-        RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
-    END IF;
-    IF NOT v_teacher_exists THEN
-        RAISE EXCEPTION 'Преподаватель с ID % не найден', p_teacher_id;
-    END IF;
     IF NOT v_subject_exists THEN
         RAISE EXCEPTION 'Дисциплина с ID % не найдена', p_subject_id;
     END IF;
@@ -910,37 +921,20 @@ BEGIN
         RAISE EXCEPTION 'Номер семестра должен быть положительным';
     END IF;
     
-    -- Регистрация оценки
+    -- Регистрация оценки с сегментом студента
     INSERT INTO app.final_grades (
         student_id, subject_id, teacher_id, final_grade_type_id, 
-        final_grade_value, semester
+        final_grade_value, semester, segment_id
     ) VALUES (
         p_student_id, p_subject_id, p_teacher_id, p_final_grade_type_id,
-        p_final_grade_value, p_semester
+        p_final_grade_value, p_semester, v_student_segment_id
     ) RETURNING final_grade_id INTO v_grade_id;
     
-    -- Получение роли, от которой могла быть вызвана функция
-    SELECT m.rolname as role_name
-    INTO v_current_role
-    FROM pg_user u 
-    JOIN pg_auth_members am ON u.usesysid = am.member
-    JOIN pg_roles m ON am.roleid = m.oid
-    WHERE u.usename = session_user
-        AND has_function_privilege(m.rolname, 'app.register_final_grade(
-        INT,
-        INT, 
-        INT,
-        INT,
-        VARCHAR(10),
-        INT
-    )', 'EXECUTE')
-    LIMIT 1;
-
     -- Логирование вызова
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'register_final_grade',
-        v_current_role,
+        session_user,
         jsonb_build_object(
             'student_id', p_student_id,
             'subject_id', p_subject_id,
@@ -950,22 +944,153 @@ BEGIN
             'semester', p_semester
         ),
         true
-    ) RETURNING call_id INTO v_call_id;
+    );
     
     RETURN v_grade_id;
 EXCEPTION
     WHEN OTHERS THEN
+        -- Логирование ошибки
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'register_final_grade',
+            session_user,
+            jsonb_build_object(
+                'student_id', p_student_id,
+                'subject_id', p_subject_id,
+                'teacher_id', p_teacher_id,
+                'final_grade_type_id', p_final_grade_type_id,
+                'final_grade_value', p_final_grade_value,
+                'semester', p_semester,
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
+END;
+$$;
+
+-- 1. Функция регистрации итоговой оценки
+CREATE OR REPLACE FUNCTION app.register_final_grade(
+    p_student_id INT,
+    p_subject_id INT, 
+    p_teacher_id INT,
+    p_final_grade_type_id INT,
+    p_final_grade_value VARCHAR(10),
+    p_semester INT
+)
+RETURNS INT
+SECURITY DEFINER
+SET search_path = 'app, ref, public'
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_grade_id INT;
+    v_student_segment_id INT;
+    v_teacher_segment_id INT;
+    v_subject_exists BOOLEAN;
+    v_grade_type_exists BOOLEAN;
+    v_allowed_values VARCHAR(255);
+BEGIN
+    -- Проверка существования и получение сегментов
+    SELECT segment_id INTO v_student_segment_id 
+    FROM app.students 
+    WHERE student_id = p_student_id;
+    
+    IF v_student_segment_id IS NULL THEN
+        RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
+    END IF;
+    
+    SELECT segment_id INTO v_teacher_segment_id 
+    FROM app.teachers 
+    WHERE teacher_id = p_teacher_id;
+    
+    IF v_teacher_segment_id IS NULL THEN
+        RAISE EXCEPTION 'Преподаватель с ID % не найден', p_teacher_id;
+    END IF;
+    
+    -- Проверка принадлежности к одному сегменту
+    IF v_student_segment_id != v_teacher_segment_id THEN
+        RAISE EXCEPTION 'Студент и преподаватель принадлежат разным сегментам данных';
+    END IF;
+    
+    SELECT EXISTS(SELECT 1 FROM ref.subjects WHERE subject_id = p_subject_id) INTO v_subject_exists;
+    SELECT EXISTS(SELECT 1 FROM ref.final_grade_types WHERE final_grade_type_id = p_final_grade_type_id) INTO v_grade_type_exists;
+    
+    IF NOT v_subject_exists THEN
+        RAISE EXCEPTION 'Дисциплина с ID % не найдена', p_subject_id;
+    END IF;
+    IF NOT v_grade_type_exists THEN
+        RAISE EXCEPTION 'Тип оценки с ID % не найден', p_final_grade_type_id;
+    END IF;
+    
+    -- Проверка допустимых значений оценки
+    SELECT allowed_values INTO v_allowed_values 
+    FROM ref.final_grade_types 
+    WHERE final_grade_type_id = p_final_grade_type_id;
+    
+    IF v_allowed_values NOT LIKE '%' || p_final_grade_value || '%' THEN
+        RAISE EXCEPTION 'Оценка "%" недопустима для выбранной системы оценивания. Допустимые значения: %', 
+            p_final_grade_value, v_allowed_values;
+    END IF;
+    
+    -- Проверка семестра
+    IF p_semester <= 0 THEN
+        RAISE EXCEPTION 'Номер семестра должен быть положительным';
+    END IF;
+    
+    -- Регистрация оценки с сегментом студента
+    INSERT INTO app.final_grades (
+        student_id, subject_id, teacher_id, final_grade_type_id, 
+        final_grade_value, semester, segment_id
+    ) VALUES (
+        p_student_id, p_subject_id, p_teacher_id, p_final_grade_type_id,
+        p_final_grade_value, p_semester, v_student_segment_id
+    ) RETURNING final_grade_id INTO v_grade_id;
+    
+    -- Логирование вызова
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'register_final_grade',
+        session_user,
+        jsonb_build_object(
+            'student_id', p_student_id,
+            'subject_id', p_subject_id,
+            'teacher_id', p_teacher_id,
+            'final_grade_type_id', p_final_grade_type_id,
+            'final_grade_value', p_final_grade_value,
+            'semester', p_semester
+        ),
+        true
+    );
+    
+    RETURN v_grade_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логирование ошибки
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'register_final_grade',
+            session_user,
+            jsonb_build_object(
+                'student_id', p_student_id,
+                'subject_id', p_subject_id,
+                'teacher_id', p_teacher_id,
+                'final_grade_type_id', p_final_grade_type_id,
+                'final_grade_value', p_final_grade_value,
+                'semester', p_semester,
+                'error', SQLERRM
+            ),
+            false
+        );
         RAISE;
 END;
 $$;
 
 GRANT EXECUTE ON FUNCTION app.register_final_grade TO app_writer, dml_admin;
 
-
---Добавление документов студента
 CREATE OR REPLACE FUNCTION app.add_student_document(
     p_student_id INT,
-    p_document_type document_type_enum,
+    p_document_type public.document_type_enum,  -- Явное указание схемы
     p_document_series VARCHAR(20),
     p_document_number VARCHAR(50),
     p_issue_date DATE,
@@ -973,23 +1098,20 @@ CREATE OR REPLACE FUNCTION app.add_student_document(
 )
 RETURNS INT
 SECURITY DEFINER
-SET search_path = 'app, public'
+SET search_path = 'app, public'  -- public включен в search_path
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_document_id INT;
-    v_student_exists BOOLEAN;
-    v_student_status public.student_status_enum;
+    v_student_segment_id INT;
+    v_student_status public.student_status_enum;  -- Явное указание схемы
     v_document_exists BOOLEAN;
-    v_current_role VARCHAR(30);
-    v_call_id INT;
 BEGIN
-    -- Проверка существования студента
-    SELECT EXISTS(SELECT 1 FROM app.students WHERE student_id = p_student_id), status
-    INTO v_student_exists, v_student_status
+    -- Проверка существования студента и получение сегмента
+    SELECT segment_id, status INTO v_student_segment_id, v_student_status
     FROM app.students WHERE student_id = p_student_id;
     
-    IF NOT v_student_exists THEN
+    IF v_student_segment_id IS NULL THEN
         RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
     END IF;
     
@@ -1003,12 +1125,13 @@ BEGIN
         RAISE EXCEPTION 'Номер документа обязателен';
     END IF;
     
-    -- Проверка уникальности документа для всех студентов
+    -- Проверка уникальности документа в рамках сегмента
     SELECT EXISTS(
         SELECT 1 FROM app.student_documents 
         WHERE document_type = p_document_type 
         AND document_number = p_document_number
         AND (p_document_series IS NULL OR document_series = p_document_series)
+        AND segment_id = v_student_segment_id
     ) INTO v_document_exists;
     
     IF v_document_exists THEN
@@ -1016,7 +1139,7 @@ BEGIN
             p_document_type, p_document_number;
     END IF;
     
-    -- Проверка уникальности типа документа для студента (один тип документа на студента)
+    -- Проверка уникальности типа документа для студента
     IF EXISTS(
         SELECT 1 FROM app.student_documents 
         WHERE student_id = p_student_id 
@@ -1025,37 +1148,20 @@ BEGIN
         RAISE EXCEPTION 'У студента уже есть документ типа "%"', p_document_type;
     END IF;
     
-    -- Добавление документа
+    -- Добавление документа с сегментом студента
     INSERT INTO app.student_documents (
         student_id, document_type, document_series, document_number,
-        issue_date, issuing_authority
+        issue_date, issuing_authority, segment_id
     ) VALUES (
         p_student_id, p_document_type, p_document_series, p_document_number,
-        p_issue_date, p_issuing_authority
+        p_issue_date, p_issuing_authority, v_student_segment_id
     ) RETURNING document_id INTO v_document_id;
     
-    -- Получение роли, от которой могла быть вызвана функция
-    SELECT m.rolname as role_name
-    INTO v_current_role
-    FROM pg_user u 
-    JOIN pg_auth_members am ON u.usesysid = am.member
-    JOIN pg_roles m ON am.roleid = m.oid
-    WHERE u.usename = session_user
-        AND has_function_privilege(m.rolname, 'app.add_student_document(
-        INT,
-        public.document_type_enum,
-        VARCHAR(20),
-        VARCHAR(50),
-        DATE,
-        TEXT
-    )', 'EXECUTE')
-    LIMIT 1;
-
     -- Логирование вызова
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'add_student_document',
-        v_current_role,
+        session_user,
         jsonb_build_object(
             'student_id', p_student_id,
             'document_type', p_document_type,
@@ -1065,19 +1171,33 @@ BEGIN
             'issuing_authority', p_issuing_authority
         ),
         true
-    ) RETURNING call_id INTO v_call_id;
+    );
 
     RETURN v_document_id;
 EXCEPTION
     WHEN OTHERS THEN
+        -- Логирование ошибки
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'add_student_document',
+            session_user,
+            jsonb_build_object(
+                'student_id', p_student_id,
+                'document_type', p_document_type,
+                'document_series', p_document_series,
+                'document_number', p_document_number,
+                'issue_date', p_issue_date,
+                'issuing_authority', p_issuing_authority,
+                'error', SQLERRM
+            ),
+            false
+        );
         RAISE;
 END;
 $$;
 
 GRANT EXECUTE ON FUNCTION app.add_student_document TO app_writer, dml_admin;
 
-
---Зачисление нового студента в группу
 CREATE OR REPLACE FUNCTION app.enroll_student(
     p_last_name VARCHAR(50),
     p_first_name VARCHAR(50), 
@@ -1093,13 +1213,12 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_new_student_id INT;
-    v_group_exists BOOLEAN;
-    v_student_card_number VARCHAR(20);
+    v_group_segment_id INT;
     v_group_name VARCHAR(20);
     v_admission_year INT;
     v_student_count INT;
-    v_current_role VARCHAR(30);
-    v_call_id INT;
+    v_student_card_number VARCHAR(20);
+    v_max_student_id INT;
 BEGIN
     -- Валидация обязательных полей
     IF p_last_name IS NULL OR p_first_name IS NULL THEN
@@ -1110,82 +1229,93 @@ BEGIN
         RAISE EXCEPTION 'ID группы обязателен';
     END IF;
     
-    -- Проверка существования группы
-    SELECT EXISTS(SELECT 1 FROM app.study_groups WHERE group_id = p_group_id) INTO v_group_exists;
-    IF NOT v_group_exists THEN
+    -- Проверка существования группы и получение сегмента
+    SELECT segment_id, group_name, admission_year 
+    INTO v_group_segment_id, v_group_name, v_admission_year
+    FROM app.study_groups WHERE group_id = p_group_id;
+    
+    IF v_group_segment_id IS NULL THEN
         RAISE EXCEPTION 'Группа с ID % не найдена', p_group_id;
     END IF;
     
-    -- Проверка уникальности email
-    IF p_email IS NOT NULL AND EXISTS(SELECT 1 FROM app.students WHERE email = p_email) THEN
-        RAISE EXCEPTION 'Студент с email % уже существует', p_email;
+    -- Проверка уникальности email в сегменте
+    IF p_email IS NOT NULL AND EXISTS(
+        SELECT 1 FROM app.students 
+        WHERE email = p_email AND segment_id = v_group_segment_id
+    ) THEN
+        RAISE EXCEPTION 'Студент с email % уже существует в данном сегменте', p_email;
     END IF;
     
-    -- Получение данных группы для генерации номера студенческого
-    SELECT group_name, admission_year INTO v_group_name, v_admission_year
-    FROM app.study_groups WHERE group_id = p_group_id;
+    -- Проверка количества студентов в группе
+    SELECT COUNT(*) INTO v_student_count 
+    FROM app.students 
+    WHERE group_id = p_group_id AND segment_id = v_group_segment_id;
     
-    -- Проверка количества студентов в группе (максимум 30)
-    SELECT COUNT(*) INTO v_student_count FROM app.students WHERE group_id = p_group_id;
     IF v_student_count >= 30 THEN
         RAISE EXCEPTION 'Группа % переполнена. Максимальное количество студентов: 30', v_group_name;
     END IF;
     
-    -- Генерация номера студенческого билета
+    -- Генерация номера студенческого билета с учетом сегмента
     v_student_card_number := upper(substring(v_group_name from 1 for 3)) || 
                             v_admission_year || '-' || 
-                            lpad((v_student_count + 1)::text, 3, '0');
+                            lpad((v_student_count + 1)::text, 3, '0') ||
+                            '-S' || v_group_segment_id;
     
-    -- Зачисление студента
+    -- Проверяем и при необходимости обновляем последовательность
+    SELECT MAX(student_id) INTO v_max_student_id FROM app.students;
+    IF v_max_student_id IS NOT NULL THEN
+        PERFORM setval('app.students_student_id_seq', v_max_student_id);
+    END IF;
+    
+    -- Зачисление студента с сегментом группы и статусом по умолчанию
     INSERT INTO app.students (
         last_name, first_name, patronymic,
         student_card_number, email, phone_number,
-        group_id, status
+        group_id, status, segment_id
     ) VALUES (
         p_last_name, p_first_name, p_patronymic,
         v_student_card_number, p_email, p_phone_number,
-        p_group_id, 'Обучается'
+        p_group_id, 'Обучается'::public.student_status_enum, v_group_segment_id
     ) RETURNING student_id INTO v_new_student_id;
     
-    -- Получение роли, от которой могла быть вызвана функция
-    SELECT m.rolname as role_name
-    INTO v_current_role
-    FROM pg_user u 
-    JOIN pg_auth_members am ON u.usesysid = am.member
-    JOIN pg_roles m ON am.roleid = m.oid
-    WHERE u.usename = session_user
-        AND has_function_privilege(m.rolname, 'app.enroll_student(
-        VARCHAR(50),
-        VARCHAR(50), 
-        VARCHAR(50),
-        VARCHAR(255),
-        VARCHAR(20),
-        INT
-    )', 'EXECUTE')
-    LIMIT 1;
-
     -- Логирование вызова
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'enroll_student',
-        v_current_role,
+        session_user,
         jsonb_build_object(
             'last_name', p_last_name,
             'first_name', p_first_name,
             'patronymic', p_patronymic,
             'email', p_email,
             'phone_number', p_phone_number,
-            'group_id', p_group_id
+            'group_id', p_group_id,
+            'assigned_segment_id', v_group_segment_id
         ),
         true
-    ) RETURNING call_id INTO v_call_id;
+    );
 
     RETURN v_new_student_id;
 EXCEPTION
     WHEN OTHERS THEN
+        -- Логирование ошибки
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'enroll_student',
+            session_user,
+            jsonb_build_object(
+                'last_name', p_last_name,
+                'first_name', p_first_name,
+                'patronymic', p_patronymic,
+                'email', p_email,
+                'phone_number', p_phone_number,
+                'group_id', p_group_id,
+                'error', SQLERRM
+            ),
+            false
+        );
         RAISE;
 END;
 $$;
 
--- Предоставление прав на выполнение
 GRANT EXECUTE ON FUNCTION app.enroll_student TO app_writer, dml_admin;
