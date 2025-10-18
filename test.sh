@@ -370,6 +370,114 @@ check_command "CREATE TABLE audit.unauthorized_table (id serial);" "auditor: CRE
 
 reset_test_connect
 
+# 3.1 Расширенное тестирование роли auditor - доступ ко всем данным
+echo -e "${BLUE}=== РАСШИРЕННОЕ ТЕСТИРОВАНИЕ AUDITOR: ДОСТУП КО ВСЕМ ДАННЫМ ===${NC}"
+
+# Подготавливаем тестовые данные для auditor в разных сегментах
+sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Создаем тестовых студентов в разных сегментах
+    INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) VALUES 
+    (20001, 'Аудитор_Тест1', 'Сегмент1', 'AUDIT_TEST1', 1000, 1000, 'audit_test1@test.ru'),
+    (20002, 'Аудитор_Тест2', 'Сегмент2', 'AUDIT_TEST2', 1001, 1001, 'audit_test2@test.ru'),
+    (20003, 'Аудитор_Тест3', 'Сегмент3', 'AUDIT_TEST3', 1, 1, 'audit_test3@test.ru')
+    ON CONFLICT (student_id) DO UPDATE SET 
+        last_name = EXCLUDED.last_name,
+        first_name = EXCLUDED.first_name,
+        segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем тестовых преподавателей в разных сегментах
+    INSERT INTO app.teachers (teacher_id, last_name, first_name, academic_degree, academic_title, segment_id) VALUES 
+    (20001, 'Аудитор_Преподаватель1', 'Сегмент1', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1000),
+    (20002, 'Аудитор_Преподаватель2', 'Сегмент2', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1001),
+    (20003, 'Аудитор_Преподаватель3', 'Сегмент3', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1)
+    ON CONFLICT (teacher_id) DO UPDATE SET 
+        last_name = EXCLUDED.last_name,
+        segment_id = EXCLUDED.segment_id;
+EOF
+
+# Даем test_connect роль auditor
+setup_test_connect_basic
+grant_additional_role_to_test_connect "auditor"
+
+echo -e "${CYAN}--- Auditor: проверка доступа ко всем данным ---${NC}"
+
+# Auditor должен видеть ВСЕХ студентов (включая тестовых из всех сегментов)
+check_row_count "SELECT * FROM app.students WHERE last_name LIKE 'Аудитор_Тест%';" "auditor: доступ ко всем тестовым студентам" 3
+
+# Auditor должен видеть студентов из всех сегментов
+result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "
+    SELECT COUNT(*) FROM app.students WHERE student_id IN (20001, 20002, 20003);
+" 2>&1 | tr -d ' \n')
+
+if [ "$result" = "3" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: auditor видит всех тестовых студентов из разных сегментов${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: auditor видит $result студентов (должен видеть 3)${NC}"
+fi
+
+# Auditor должен видеть ВСЕХ преподавателей
+check_row_count "SELECT * FROM app.teachers WHERE last_name LIKE 'Аудитор_Преподаватель%';" "auditor: доступ ко всем тестовым преподавателям" 3
+
+# Auditor должен видеть ВСЕ учебные заведения
+check_command "SELECT COUNT(*) FROM app.educational_institutions;" "auditor: доступ ко всем учебным заведениям" "success"
+
+# Auditor должен видеть ВСЕ оценки
+check_command "SELECT COUNT(*) FROM app.final_grades LIMIT 5;" "auditor: доступ ко всем итоговым оценкам" "success"
+
+# Auditor должен видеть ВСЕ расписания
+check_command "SELECT COUNT(*) FROM app.class_schedule LIMIT 5;" "auditor: доступ ко всем расписаниям" "success"
+
+# Auditor должен иметь доступ к аудиторским таблицам
+check_command "SELECT COUNT(*) FROM audit.login_log LIMIT 5;" "auditor: доступ к логам авторизации" "success"
+check_command "SELECT COUNT(*) FROM audit.function_calls LIMIT 5;" "auditor: доступ к логам вызовов функций" "success"
+
+# Сравниваем: обычный пользователь vs auditor
+echo -e "${BLUE}=== СРАВНЕНИЕ: ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ vs AUDITOR ===${NC}"
+
+# Возвращаем test_connect к обычной роли с доступом только к сегменту 1000
+reset_test_connect
+set_test_connect_segment 1000
+setup_test_connect_basic
+
+# Обычный пользователь должен видеть только студентов сегмента 1000
+result_ordinary=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "
+    SELECT app.set_session_ctx(1000, 1000);
+    SELECT COUNT(*) FROM app.students WHERE student_id IN (20001, 20002, 20003);
+" 2>&1 | tr -d ' \n')
+
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+        REVOKE app_reader FROM test_connect;
+        REVOKE app_writer FROM test_connect;
+    " 2>&1
+# Снова даем роль auditor
+grant_additional_role_to_test_connect "auditor"
+
+# Auditor снова должен видеть всех студентов
+result_auditor=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "
+    SELECT COUNT(*) FROM app.students WHERE student_id IN (20001, 20002, 20003);
+" 2>&1 | tr -d ' \n')
+
+if [ "$result_ordinary" = "1" ] && [ "$result_auditor" = "3" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Обычный пользователь видит $result_ordinary студента, auditor видит $result_auditor студентов${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Обычный пользователь видит $result_ordinary, auditor видит $result_auditor (должны быть 1 и 3)${NC}"
+fi
+
+# Проверяем, что auditor не может изменять данные (только чтение)
+echo -e "${PURPLE}--- Auditor: проверка ограничений (только чтение) ---${NC}"
+check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Неавторизованный', 'Студент', 'AUDIT_INSERT', 1000, 1000);" "auditor: запрет на INSERT" "error"
+check_command "UPDATE app.students SET last_name = 'Измененный' WHERE student_id = 20001;" "auditor: запрет на UPDATE" "error"
+check_command "DELETE FROM app.students WHERE student_id = 20001;" "auditor: запрет на DELETE" "error"
+
+# Очистка тестовых данных для auditor
+sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    DELETE FROM app.student_documents WHERE student_id IN (20001, 20002, 20003);
+    DELETE FROM app.students WHERE student_id IN (20001, 20002, 20003);
+    DELETE FROM app.teachers WHERE teacher_id IN (20001, 20002, 20003);
+EOF
+
+reset_test_connect
+
 # 4. Тестирование роли ddl_admin (доступ ко всем сегментам)
 echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ddl_admin (все сегменты) ===${NC}"
 setup_test_connect_basic

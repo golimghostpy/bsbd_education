@@ -51,7 +51,9 @@ GRANT CREATE ON SCHEMA app TO app_owner;
 -- ###### права для роли auditor
 GRANT CONNECT ON DATABASE education_db TO auditor;
 GRANT USAGE ON SCHEMA audit TO auditor;
+GRANT USAGE ON SCHEMA app TO auditor;
 ALTER DEFAULT PRIVILEGES IN SCHEMA audit GRANT SELECT ON TABLES TO auditor;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO auditor;
 
 -- ###### права для роли ddl_admin
 GRANT CONNECT ON DATABASE education_db TO ddl_admin;
@@ -1552,6 +1554,70 @@ FOR DELETE USING (
     app.check_segment_access(segment_id) AND
     current_user LIKE '%_owner'
 );
+
+-- политики только для аудитора - полный доступ на чтение ко всем данным
+CREATE POLICY auditor_bypass_rls ON app.educational_institutions
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.faculties
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.departments
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.study_groups
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.teachers
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.students
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.teacher_departments
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.academic_plans
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.final_grades
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.interim_grades
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.class_schedule
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.student_documents
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.student_institutions
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON app.teacher_institutions
+    FOR SELECT TO auditor USING (true);
+
+-- Политики для справочных таблиц в схеме ref
+CREATE POLICY auditor_bypass_rls ON ref.subjects
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON ref.final_grade_types
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON ref.segments
+    FOR SELECT TO auditor USING (true);
+
+-- Политики для аудиторских таблиц в схеме audit
+CREATE POLICY auditor_bypass_rls ON audit.login_log
+    FOR SELECT TO auditor USING (true);
+
+CREATE POLICY auditor_bypass_rls ON audit.function_calls
+    FOR SELECT TO auditor USING (true);
+
+-- Политика для таблицы сопоставления ролей и сегментов
+CREATE POLICY auditor_bypass_rls ON app.role_segments
+    FOR SELECT TO auditor USING (true);
 
 CREATE OR REPLACE FUNCTION app.set_session_ctx(
     p_segment_id INTEGER,
