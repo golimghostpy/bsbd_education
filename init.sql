@@ -1319,3 +1319,397 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION app.enroll_student TO app_writer, dml_admin;
+
+
+-- Включение RLS на всех основных таблицах приложения
+ALTER TABLE app.educational_institutions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.faculties ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.departments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.study_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.teachers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.students ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.academic_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.final_grades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.interim_grades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.class_schedule ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.student_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.student_institutions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.teacher_institutions ENABLE ROW LEVEL SECURITY;
+
+-- Включение FORCE RLS на критически важных таблицах
+ALTER TABLE app.students FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.teachers FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.final_grades FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.interim_grades FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.student_documents FORCE ROW LEVEL SECURITY;
+
+-- Таблица для сопоставления ролей с сегментами
+CREATE TABLE app.role_segments (
+    role_name VARCHAR(100) PRIMARY KEY,
+    segment_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (segment_id) REFERENCES ref.segments(segment_id)
+);
+
+-- Заполняем таблицу сопоставления ролей с сегментами
+INSERT INTO app.role_segments (role_name, segment_id) VALUES
+('hse_moscow_reader', 1),
+('hse_moscow_writer', 1),
+('hse_moscow_owner', 1),
+('hse_spb_reader', 2),
+('hse_spb_writer', 2),
+('hse_spb_owner', 2),
+('hse_nn_reader', 3),
+('hse_nn_writer', 3),
+('hse_nn_owner', 3),
+('msu_reader', 4),
+('msu_writer', 4),
+('msu_owner', 4),
+('phystech_reader', 5),
+('phystech_writer', 5),
+('phystech_owner', 5),
+('rudn_reader', 6),
+('rudn_writer', 6),
+('rudn_owner', 6),
+('nstu_reader', 7),
+('nstu_writer', 7),
+('nstu_owner', 7);
+
+-- Функция для получения segment_id текущего пользователя
+CREATE OR REPLACE FUNCTION app.get_current_segment_id()
+RETURNS INT
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_segment_id INT;
+    v_setting_value TEXT;
+BEGIN
+    -- Пытаемся получить segment_id из GUC
+    BEGIN
+        v_setting_value := current_setting('app.segment_id', true);
+        IF v_setting_value IS NOT NULL AND v_setting_value != '' THEN
+            RETURN v_setting_value::INT;
+        END IF;
+    EXCEPTION
+        WHEN undefined_object THEN
+            NULL; -- Настройка не установлена, продолжаем
+    END;
+    
+    -- Если GUC не установлен, ищем по имени роли
+    SELECT segment_id INTO v_segment_id
+    FROM app.role_segments
+    WHERE role_name = current_user;
+    
+    RETURN v_segment_id;
+END;
+$$;
+
+-- Функция проверки доступа к сегменту
+CREATE OR REPLACE FUNCTION app.check_segment_access(p_segment_id INT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_current_segment_id INT;
+    v_is_admin BOOLEAN;
+BEGIN
+    -- Административные роли имеют доступ ко всем данным
+    SELECT EXISTS(
+        SELECT 1 FROM pg_roles 
+        WHERE rolname = current_user 
+        AND rolname IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres')
+    ) INTO v_is_admin;
+    
+    IF v_is_admin THEN
+        RETURN TRUE;
+    END IF;
+    
+    -- Для обычных ролей проверяем соответствие сегментов
+    v_current_segment_id := app.get_current_segment_id();
+    
+    RETURN v_current_segment_id IS NOT NULL AND v_current_segment_id = p_segment_id;
+END;
+$$;
+
+-- Универсальная политика для SELECT
+CREATE POLICY select_policy ON app.educational_institutions
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.faculties
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.departments
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.study_groups
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.teachers
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.students
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.academic_plans
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.final_grades
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.interim_grades
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.class_schedule
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.student_documents
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.student_institutions
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+CREATE POLICY select_policy ON app.teacher_institutions
+FOR SELECT USING (app.check_segment_access(segment_id));
+
+-- Политики для INSERT с проверкой сегмента
+CREATE POLICY insert_policy ON app.students
+FOR INSERT WITH CHECK (
+    app.check_segment_access(segment_id) AND 
+    segment_id = app.get_current_segment_id()
+);
+
+CREATE POLICY insert_policy ON app.teachers
+FOR INSERT WITH CHECK (
+    app.check_segment_access(segment_id) AND 
+    segment_id = app.get_current_segment_id()
+);
+
+CREATE POLICY insert_policy ON app.final_grades
+FOR INSERT WITH CHECK (
+    app.check_segment_access(segment_id) AND 
+    segment_id = app.get_current_segment_id()
+);
+
+CREATE POLICY insert_policy ON app.interim_grades
+FOR INSERT WITH CHECK (
+    app.check_segment_access(segment_id) AND 
+    segment_id = app.get_current_segment_id()
+);
+
+CREATE POLICY insert_policy ON app.student_documents
+FOR INSERT WITH CHECK (
+    app.check_segment_access(segment_id) AND 
+    segment_id = app.get_current_segment_id()
+);
+
+-- Политики для UPDATE
+CREATE POLICY update_policy ON app.students
+FOR UPDATE USING (app.check_segment_access(segment_id))
+WITH CHECK (app.check_segment_access(segment_id));
+
+CREATE POLICY update_policy ON app.teachers
+FOR UPDATE USING (app.check_segment_access(segment_id))
+WITH CHECK (app.check_segment_access(segment_id));
+
+CREATE POLICY update_policy ON app.final_grades
+FOR UPDATE USING (app.check_segment_access(segment_id))
+WITH CHECK (app.check_segment_access(segment_id));
+
+-- Политики для DELETE (ограниченные)
+CREATE POLICY delete_policy ON app.students
+FOR DELETE USING (
+    app.check_segment_access(segment_id) AND
+    current_user LIKE '%_owner'  -- Только owner-роли могут удалять
+);
+
+CREATE POLICY delete_policy ON app.final_grades
+FOR DELETE USING (
+    app.check_segment_access(segment_id) AND
+    current_user LIKE '%_owner'
+);
+
+-- SECURITY DEFINER функция для установки контекста сессии
+CREATE OR REPLACE FUNCTION app.set_session_ctx(
+    p_segment_id INT,
+    p_actor_id INT DEFAULT NULL
+)
+RETURNS VOID
+SECURITY DEFINER
+SET search_path = 'app, ref, public'
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_role_segment_id INT;
+    v_has_access BOOLEAN;
+    v_actor_name TEXT;
+BEGIN
+    -- Проверяем существование сегмента
+    IF NOT EXISTS(SELECT 1 FROM ref.segments WHERE segment_id = p_segment_id) THEN
+        RAISE EXCEPTION 'Сегмент с ID % не существует', p_segment_id;
+    END IF;
+    
+    -- Проверяем право доступа роли к сегменту
+    SELECT segment_id INTO v_role_segment_id
+    FROM app.role_segments
+    WHERE role_name = current_user;
+    
+    -- Административные роли имеют доступ ко всем сегментам
+    IF current_user IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres') THEN
+        v_has_access := TRUE;
+    ELSE
+        v_has_access := (v_role_segment_id IS NOT NULL AND v_role_segment_id = p_segment_id);
+    END IF;
+    
+    IF NOT v_has_access THEN
+        RAISE EXCEPTION 'Роль % не имеет доступа к сегменту %', current_user, p_segment_id;
+    END IF;
+    
+    -- Получаем имя актора если передан ID
+    IF p_actor_id IS NOT NULL THEN
+        SELECT CONCAT(last_name, ' ', first_name) INTO v_actor_name
+        FROM app.teachers WHERE teacher_id = p_actor_id;
+        
+        IF v_actor_name IS NULL THEN
+            SELECT CONCAT(last_name, ' ', first_name) INTO v_actor_name
+            FROM app.students WHERE student_id = p_actor_id;
+        END IF;
+        
+        IF v_actor_name IS NULL THEN
+            v_actor_name := 'Unknown';
+        END IF;
+    ELSE
+        v_actor_name := current_user;
+    END IF;
+    
+    -- Устанавливаем GUC параметры сессии
+    PERFORM set_config('app.segment_id', p_segment_id::text, false);
+    PERFORM set_config('app.actor_id', COALESCE(p_actor_id::text, '0'), false);
+    PERFORM set_config('app.actor_name', v_actor_name, false);
+    PERFORM set_config('app.session_start', to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS'), false);
+    
+    -- Логируем установку контекста
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'set_session_ctx',
+        current_user,
+        jsonb_build_object(
+            'segment_id', p_segment_id,
+            'actor_id', p_actor_id,
+            'actor_name', v_actor_name,
+            'session_start', CURRENT_TIMESTAMP
+        ),
+        true
+    );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'set_session_ctx',
+            current_user,
+            jsonb_build_object(
+                'segment_id', p_segment_id,
+                'actor_id', p_actor_id,
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
+END;
+$$;
+
+-- Функция для получения текущего контекста
+CREATE OR REPLACE FUNCTION app.get_session_ctx()
+RETURNS TABLE(
+    segment_id INT,
+    actor_id INT,
+    actor_name TEXT,
+    session_start TIMESTAMP
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        NULLIF(current_setting('app.segment_id', true), '')::INT,
+        NULLIF(current_setting('app.actor_id', true), '')::INT,
+        NULLIF(current_setting('app.actor_name', true), '')::TEXT,
+        NULLIF(current_setting('app.session_start', true), '')::TIMESTAMP;
+EXCEPTION
+    WHEN undefined_object THEN
+        RETURN; -- Возвращаем пустые значения если настройки не установлены
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.set_session_ctx TO app_reader, app_writer, app_owner, ddl_admin, dml_admin;
+GRANT EXECUTE ON FUNCTION app.get_session_ctx TO app_reader, app_writer, app_owner, ddl_admin, dml_admin;
+GRANT EXECUTE ON FUNCTION app.get_current_segment_id TO app_reader, app_writer, app_owner, ddl_admin, dml_admin;
+
+-- Создание конкретных ролей для каждого сегмента
+-- НИУ ВШЭ - Москва
+CREATE ROLE hse_moscow_reader;
+CREATE ROLE hse_moscow_writer; 
+CREATE ROLE hse_moscow_owner;
+
+GRANT app_reader TO hse_moscow_reader;
+GRANT app_writer TO hse_moscow_writer;
+GRANT app_owner TO hse_moscow_owner;
+
+-- НИУ ВШЭ - СПб
+CREATE ROLE hse_spb_reader;
+CREATE ROLE hse_spb_writer;
+CREATE ROLE hse_spb_owner;
+
+GRANT app_reader TO hse_spb_reader;
+GRANT app_writer TO hse_spb_writer;
+GRANT app_owner TO hse_spb_owner;
+
+-- НИУ ВШЭ - НН
+CREATE ROLE hse_nn_reader;
+CREATE ROLE hse_nn_writer;
+CREATE ROLE hse_nn_owner;
+
+GRANT app_reader TO hse_nn_reader;
+GRANT app_writer TO hse_nn_writer;
+GRANT app_owner TO hse_nn_owner;
+
+-- МГУ
+CREATE ROLE msu_reader;
+CREATE ROLE msu_writer;
+CREATE ROLE msu_owner;
+
+GRANT app_reader TO msu_reader;
+GRANT app_writer TO msu_writer;
+GRANT app_owner TO msu_owner;
+
+-- МФТИ
+CREATE ROLE phystech_reader;
+CREATE ROLE phystech_writer;
+CREATE ROLE phystech_owner;
+
+GRANT app_reader TO phystech_reader;
+GRANT app_writer TO phystech_writer;
+GRANT app_owner TO phystech_owner;
+
+-- РУДН
+CREATE ROLE rudn_reader;
+CREATE ROLE rudn_writer;
+CREATE ROLE rudn_owner;
+
+GRANT app_reader TO rudn_reader;
+GRANT app_writer TO rudn_writer;
+GRANT app_owner TO rudn_owner;
+
+-- НГТУ
+CREATE ROLE nstu_reader;
+CREATE ROLE nstu_writer;
+CREATE ROLE nstu_owner;
+
+GRANT app_reader TO nstu_reader;
+GRANT app_writer TO nstu_writer;
+GRANT app_owner TO nstu_owner;
+
