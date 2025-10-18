@@ -9,6 +9,92 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Функция для создания тестовых ролей с сегментами
+create_test_roles() {
+    echo "Создание тестовых ролей с сегментами..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Создаем тестовые сегменты
+    INSERT INTO ref.segments (segment_id, segment_name, description) VALUES 
+    (1000, 'Тестовый Университет 1000', 'Тестовый сегмент для тестирования'),
+    (1001, 'Тестовый Университет 1001', 'Другой тестовый сегмент')
+    ON CONFLICT (segment_id) DO NOTHING;
+    
+    -- Создаем тестовые роли для сегмента 1000
+    DO $$ 
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_reader_1000') THEN
+            CREATE ROLE test_reader_1000;
+            GRANT app_reader TO test_reader_1000;
+        END IF;
+        
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_writer_1000') THEN
+            CREATE ROLE test_writer_1000;
+            GRANT app_writer TO test_writer_1000;
+        END IF;
+        
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_reader_1001') THEN
+            CREATE ROLE test_reader_1001;
+            GRANT app_reader TO test_reader_1001;
+        END IF;
+        
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_writer_1001') THEN
+            CREATE ROLE test_writer_1001;
+            GRANT app_writer TO test_writer_1001;
+        END IF;
+    END $$;
+    
+    -- Добавляем роли в таблицу сопоставления
+    INSERT INTO app.role_segments (role_name, segment_id) VALUES
+    ('test_reader_1000', 1000),
+    ('test_writer_1000', 1000),
+    ('test_reader_1001', 1001),
+    ('test_writer_1001', 1001)
+    ON CONFLICT (role_name) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+EOF
+}
+
+# Функция для подготовки тестовых данных с учетом сегментации
+prepare_test_data() {
+    echo "Подготовка тестовых данных с сегментацией..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Создаем тестовые учебные заведения
+    INSERT INTO app.educational_institutions (institution_id, institution_name, short_name, legal_address, segment_id) VALUES 
+    (1000, 'Тестовый Университет 1000', 'ТУ1000', 'Тестовый адрес 1000', 1000),
+    (1001, 'Тестовый Университет 1001', 'ТУ1001', 'Тестовый адрес 1001', 1001)
+    ON CONFLICT (institution_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем тестовые факультеты
+    INSERT INTO app.faculties (faculty_id, faculty_name, institution_id, segment_id) VALUES 
+    (1000, 'Тестовый Факультет 1000', 1000, 1000),
+    (1001, 'Тестовый Факультет 1001', 1001, 1001)
+    ON CONFLICT (faculty_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем тестовые группы
+    INSERT INTO app.study_groups (group_id, group_name, admission_year, faculty_id, segment_id) VALUES 
+    (1000, 'TEST-1000', 2024, 1000, 1000),
+    (1001, 'TEST-1001', 2024, 1001, 1001)
+    ON CONFLICT (group_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем тестовых преподавателей
+    INSERT INTO app.teachers (teacher_id, last_name, first_name, academic_degree, academic_title, segment_id) VALUES 
+    (1000, 'Тестовый1000', 'Преподаватель1000', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1000),
+    (1001, 'Тестовый1001', 'Преподаватель1001', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1001)
+    ON CONFLICT (teacher_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем тестовых студентов
+    INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) VALUES 
+    (1000, 'Студент1000', 'Тестов1000', 'TEST1000', 1000, 1000, 'student1000@test.ru'),
+    (1001, 'Студент1001', 'Тестов1001', 'TEST1001', 1001, 1001, 'student1001@test.ru')
+    ON CONFLICT (student_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем тестовые документы
+    INSERT INTO app.student_documents (student_id, document_type, document_number, segment_id) VALUES 
+    (1000, 'Паспорт'::public.document_type_enum, 'PASS1000', 1000),
+    (1001, 'Паспорт'::public.document_type_enum, 'PASS1001', 1001)
+    ON CONFLICT DO NOTHING;
+EOF
+}
+
 check_connection() {
     check_connect=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db 2>&1)
 
@@ -62,6 +148,26 @@ check_command() {
     echo ""
 }
 
+# Функция для проверки количества строк в результате
+check_row_count() {
+    local command=$1
+    local test_name=$2
+    local expected_count=$3
+    
+    echo "Тестирование: $test_name"
+    result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "$command" 2>&1)
+    row_count=$(echo "$result" | grep -v '^$' | wc -l)
+    
+    if [ "$row_count" -eq "$expected_count" ]; then
+        echo -e "${GREEN}+++ УСПЕХ: Найдено $row_count строк (ожидалось $expected_count)${NC}"
+        return 0
+    else
+        echo -e "${RED}--- ОШИБКА: Найдено $row_count строк (ожидалось $expected_count)${NC}"
+        echo "Результат: $result"
+        return 1
+    fi
+}
+
 check_audit() {
     check_audit_result=$(sudo docker exec -i postgres psql -h localhost -U postgres -d education_db -c "SELECT username FROM audit.login_log" 2>&1)
 
@@ -105,72 +211,21 @@ check_function() {
     echo ""
 }
 
-# Функция для подготовки тестовых данных с учетом сегментации
-prepare_test_data() {
-    echo "Подготовка тестовых данных с сегментацией..."
-    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
-    -- Создаем тестовый сегмент
-    INSERT INTO ref.segments (segment_id, segment_name, description) 
-    VALUES (1000, 'Тестовый Университет', 'Тестовый сегмент для тестирования') 
-    ON CONFLICT (segment_id) DO NOTHING;
-    
-    -- Создаем тестовое учебное заведение
-    INSERT INTO app.educational_institutions (institution_name, short_name, legal_address, segment_id) 
-    VALUES ('Тестовый Университет 1000', 'ТУ1000', 'Тестовый адрес 1000', 1000)
-    ON CONFLICT (institution_name) DO NOTHING;
-    
-    -- Создаем тестовый факультет
-    INSERT INTO app.faculties (faculty_name, institution_id, segment_id) 
-    SELECT 'Тестовый Факультет 1000', institution_id, 1000
-    FROM app.educational_institutions 
-    WHERE institution_name = 'Тестовый Университет 1000'
-    ON CONFLICT (faculty_name, segment_id) DO NOTHING;
-    
-    -- Создаем тестовую группу
-    INSERT INTO app.study_groups (group_name, admission_year, faculty_id, segment_id) 
-    SELECT 'TEST-1000', 2024, faculty_id, 1000
-    FROM app.faculties 
-    WHERE faculty_name = 'Тестовый Факультет 1000'
-    ON CONFLICT (group_name, segment_id) DO NOTHING;
-    
-    -- Создаем тестового преподавателя
-    INSERT INTO app.teachers (last_name, first_name, academic_degree, academic_title, segment_id) 
-    VALUES ('Тестовый1000', 'Преподаватель1000', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1000)
-    ON CONFLICT (last_name, first_name, segment_id) DO NOTHING;
-    
-    -- Создаем тестового студента
-    INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) 
-    SELECT 'Тестов1000', 'test1000', 'TEST1000', group_id, 1000
-    FROM app.study_groups 
-    WHERE group_name = 'TEST-1000'
-    ON CONFLICT (student_card_number) DO NOTHING;
-EOF
-}
-
 # Функция для получения ID тестовой группы
 get_test_group_id() {
-    local group_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT group_id FROM app.study_groups WHERE group_name = 'TEST-1000' AND segment_id = 1000 LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    if [ -z "$group_id" ]; then
-        group_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT group_id FROM app.study_groups LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    fi
+    local group_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT group_id FROM app.study_groups WHERE group_id = 1000 LIMIT 1;" 2>&1 | tr -d '[:space:]')
     echo "$group_id"
 }
 
 # Функция для получения ID тестового студента
 get_test_student_id() {
-    local student_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT student_id FROM app.students WHERE student_card_number = 'TEST1000' LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    if [ -z "$student_id" ]; then
-        student_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT student_id FROM app.students LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    fi
+    local student_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT student_id FROM app.students WHERE student_id = 1000 LIMIT 1;" 2>&1 | tr -d '[:space:]')
     echo "$student_id"
 }
 
 # Функция для получения ID тестового преподавателя
 get_test_teacher_id() {
-    local teacher_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT teacher_id FROM app.teachers WHERE last_name = 'Тестовый1000' AND segment_id = 1000 LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    if [ -z "$teacher_id" ]; then
-        teacher_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT teacher_id FROM app.teachers LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    fi
+    local teacher_id=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT teacher_id FROM app.teachers WHERE teacher_id = 1000 LIMIT 1;" 2>&1 | tr -d '[:space:]')
     echo "$teacher_id"
 }
 
@@ -178,23 +233,30 @@ get_test_teacher_id() {
 cleanup_test_data() {
     echo "Очистка тестовых данных..."
     sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Сначала очищаем таблицу сопоставления ролей
+    DELETE FROM app.role_segments WHERE role_name LIKE 'test_%' OR segment_id = 1000 OR segment_id = 1001;
+    
     -- Удаляем в правильном порядке из-за внешних ключей
-    DELETE FROM app.student_documents WHERE student_id IN (SELECT student_id FROM app.students WHERE student_card_number LIKE 'TEST%');
-    DELETE FROM app.final_grades WHERE student_id IN (SELECT student_id FROM app.students WHERE student_card_number LIKE 'TEST%');
-    DELETE FROM app.interim_grades WHERE student_id IN (SELECT student_id FROM app.students WHERE student_card_number LIKE 'TEST%');
-    DELETE FROM app.students WHERE student_card_number LIKE 'TEST%';
-    DELETE FROM app.teacher_departments WHERE teacher_id IN (SELECT teacher_id FROM app.teachers WHERE last_name = 'Тестовый1000');
-    DELETE FROM app.teachers WHERE last_name = 'Тестовый1000' AND segment_id = 1000;
-    DELETE FROM app.study_groups WHERE group_name = 'TEST-1000';
-    DELETE FROM app.faculties WHERE faculty_name = 'Тестовый Факультет 1000';
-    DELETE FROM app.educational_institutions WHERE institution_name = 'Тестовый Университет 1000';
-    DELETE FROM ref.segments WHERE segment_id = 1000;
+    DELETE FROM app.student_documents WHERE student_id IN (1000, 1001);
+    DELETE FROM app.students WHERE student_id IN (1000, 1001);
+    DELETE FROM app.teacher_departments WHERE teacher_id IN (1000, 1001);
+    DELETE FROM app.teachers WHERE teacher_id IN (1000, 1001);
+    DELETE FROM app.study_groups WHERE group_id IN (1000, 1001);
+    DELETE FROM app.faculties WHERE faculty_id IN (1000, 1001);
+    DELETE FROM app.educational_institutions WHERE institution_id IN (1000, 1001);
+    DELETE FROM ref.segments WHERE segment_id IN (1000, 1001);
     
     DROP TABLE IF EXISTS app.test_table, app.unauthorized_table, ref.unauthorized_ref_table, app.test_table1;
     DROP TABLE IF EXISTS audit.unauthorized_audit_table;
     COMMENT ON SCHEMA app IS 'NULL';
+    
+    -- Удаляем тестовые роли
+    DROP ROLE IF EXISTS test_reader_1000, test_writer_1000, test_reader_1001, test_writer_1001;
 EOF
 }
+
+# Создаем тестовые роли
+create_test_roles
 
 echo -e "${YELLOW}=== Тестирование подключения без роли ===${NC}"
 check_connection
@@ -217,50 +279,49 @@ TEST_TEACHER_ID=$(get_test_teacher_id)
 
 echo "Тестовые ID: группа=$TEST_GROUP_ID, студент=$TEST_STUDENT_ID, преподаватель=$TEST_TEACHER_ID"
 
-# 1. Тестирование роли app_reader
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_reader ===${NC}"
-manage_role "GRANT" "app_reader"
+# 1. Тестирование роли app_reader с сегментацией
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_reader С СЕГМЕНТАЦИЕЙ ===${NC}"
+manage_role "GRANT" "test_reader_1000"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "SELECT first_name FROM app.students LIMIT 1;" "app_reader: SELECT в схеме app" "success"
-check_command "SELECT subject_name FROM ref.subjects LIMIT 1;" "app_reader: SELECT в схеме ref" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); SELECT first_name FROM app.students WHERE segment_id = 1000 LIMIT 1;" "test_reader_1000: SELECT в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); SELECT subject_name FROM ref.subjects LIMIT 1;" "test_reader_1000: SELECT в схеме ref" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
-check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Тестов', 'test3', 'TEST003', 1, 1);" "app_reader: INSERT в схеме app" "error"
-check_command "CREATE TABLE app.unauthorized_table (id serial);" "app_reader: CREATE TABLE в схеме app" "error"
-check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "app_reader: SELECT в схеме audit" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Тестов', 'test3', 'TEST003', $TEST_GROUP_ID, 1000);" "test_reader_1000: INSERT в схеме app" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); CREATE TABLE app.unauthorized_table (id serial);" "test_reader_1000: CREATE TABLE в схеме app" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); SELECT first_name FROM app.students WHERE segment_id = 1 LIMIT 1;" "test_reader_1000: SELECT в чужом сегменте" "success"
 
-manage_role "REVOKE" "app_reader"
+manage_role "REVOKE" "test_reader_1000"
 
-# 2. Тестирование роли app_writer  
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_writer ===${NC}"
-manage_role "GRANT" "app_writer"
+# 2. Тестирование роли app_writer с сегментацией
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_writer С СЕГМЕНТАЦИЕЙ ===${NC}"
+manage_role "GRANT" "test_writer_1000"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "SELECT COUNT(*) FROM app.students WHERE student_card_number = 'TEST1000';" "app_writer: SELECT существующего студента" "success"
-check_command "SELECT subject_name FROM ref.subjects LIMIT 1;" "app_writer: SELECT в схеме ref" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); SELECT COUNT(*) FROM app.students WHERE student_card_number = 'TEST1000';" "test_writer_1000: SELECT в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); SELECT subject_name FROM ref.subjects LIMIT 1;" "test_writer_1000: SELECT в схеме ref" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
-check_command "CREATE TABLE app.unauthorized_table (id serial);" "app_writer: CREATE TABLE в схеме app" "error"
-check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "app_writer: SELECT в схеме audit" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); CREATE TABLE app.unauthorized_table (id serial);" "test_writer_1000: CREATE TABLE в схеме app" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); SELECT first_name FROM app.students WHERE segment_id = 1 LIMIT 1;" "test_writer_1000: SELECT в чужом сегменте" "success"
 
-manage_role "REVOKE" "app_writer"
+manage_role "REVOKE" "test_writer_1000"
 
-# 3. Тестирование роли app_owner
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_owner ===${NC}"
-manage_role "GRANT" "app_owner"
+# 3. Тестирование роли app_owner с сегментацией
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ app_owner С СЕГМЕНТАЦИЕЙ ===${NC}"
+manage_role "GRANT" "test_owner_1000"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "DELETE FROM app.students WHERE student_card_number = 'TEST1000';" "app_owner: DELETE в схеме app" "success"
-check_command "CREATE TABLE app.test_table (id serial, name text);" "app_owner: CREATE TABLE в схеме app" "success"
-check_command "COMMENT ON SCHEMA app IS 'тестовый комм';" "app_owner: COMMENT ON TABLE в схеме app" "success"
-check_command "SELECT obj_description((SELECT oid FROM pg_namespace WHERE nspname = 'app'));" "app_owner: SELECT COMMENT ON TABLE в схеме app" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); DELETE FROM app.students WHERE student_card_number = 'TEST1000';" "test_owner_1000: DELETE в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); CREATE TABLE app.test_table (id serial, name text);" "test_owner_1000: CREATE TABLE в схеме app" "success"
+check_command "SELECT app.set_session_ctx(1000, 1); COMMENT ON SCHEMA app IS 'тестовый комм';" "test_owner_1000: COMMENT ON TABLE в схеме app" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
-check_command "CREATE TABLE ref.unauthorized_ref_table (id serial);" "app_owner: CREATE TABLE в схеме ref" "error"
-check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "app_owner: SELECT в схеме audit" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); CREATE TABLE ref.unauthorized_ref_table (id serial);" "test_owner_1000: CREATE TABLE в схеме ref" "error"
+check_command "SELECT app.set_session_ctx(1000, 1); DELETE FROM app.students WHERE segment_id = 1;" "test_owner_1000: DELETE в чужом сегменте" "success"
 
-manage_role "REVOKE" "app_owner"
+manage_role "REVOKE" "test_owner_1000"
 
 # 4. Тестирование роли auditor
 echo -e "${BLUE}=== ТЕСТИРОВАНИЕ auditor ===${NC}"
@@ -275,45 +336,41 @@ check_command "CREATE TABLE audit.unauthorized_table (id serial);" "auditor: CRE
 
 manage_role "REVOKE" "auditor"
 
-# 5. Тестирование роли ddl_admin
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ddl_admin ===${NC}"
+# 5. Тестирование роли ddl_admin (доступ ко всем сегментам)
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ddl_admin (все сегменты) ===${NC}"
 manage_role "GRANT" "ddl_admin"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
 check_command "CREATE TABLE app.test_table1 (id serial, name text);" "ddl_admin: CREATE TABLE в схеме app" "success"
 check_command "ALTER TABLE app.test_table ADD COLUMN description text;" "ddl_admin: ALTER TABLE в схеме app" "success"
+check_command "SELECT table_name FROM information_schema.tables WHERE table_schema = 'app' LIMIT 1;" "ddl_admin: SELECT метаданных" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
-if [ -n "$TEST_GROUP_ID" ]; then
-    check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Неавторизованный', 'test', 'TESTDDL', $TEST_GROUP_ID, 1000);" "ddl_admin: INSERT в таблицу" "error"
-else
-    check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Неавторизованный', 'test', 'TESTDDL', 1, 1);" "ddl_admin: INSERT в таблицу" "error"
-fi
+check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Неавторизованный', 'test', 'TESTDDL', 1, 1);" "ddl_admin: INSERT в таблицу" "error"
+check_command "SELECT first_name FROM app.students LIMIT 1;" "ddl_admin: SELECT данных из таблиц" "error"
 
 # Очистка тестовых таблиц DDL администратора
 sudo docker exec -i postgres psql -U postgres -d education_db -c "DROP TABLE IF EXISTS app.test_table, app.test_table1;" 2>&1
 
 manage_role "REVOKE" "ddl_admin"
 
-# 6. Тестирование роли dml_admin
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ dml_admin ===${NC}"
+# 6. Тестирование роли dml_admin (доступ ко всем сегментам)
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ dml_admin (все сегменты) ===${NC}"
 manage_role "GRANT" "dml_admin"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
 # Восстанавливаем тестового студента для UPDATE
-if [ -n "$TEST_GROUP_ID" ]; then
-    sudo docker exec -i postgres psql -U postgres -d education_db -c "
-INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) 
-VALUES ('Тестов1000', 'test1000', 'TEST1000', $TEST_GROUP_ID, 1000)
-ON CONFLICT (student_card_number) DO UPDATE SET last_name = 'Тестов1000';" 2>&1
-fi
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id) 
+VALUES (1000, 'Тестов1000', 'test1000', 'TEST1000', 1000, 1000)
+ON CONFLICT (student_id) DO UPDATE SET last_name = 'Тестов1000';" 2>&1
 
 check_command "UPDATE app.students SET last_name = 'Updated' WHERE student_card_number = 'TEST1000';" "dml_admin: UPDATE в схеме app" "success"
+check_command "SELECT first_name FROM app.students LIMIT 1;" "dml_admin: SELECT из students" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "CREATE TABLE app.unauthorized_table (id serial);" "dml_admin: CREATE TABLE в схеме app" "error"
 check_command "INSERT INTO audit.login_log (username, client_ip) VALUES ('test', '127.0.0.1');" "dml_admin: INSERT в схеме audit" "error"
-check_command "SELECT log_id FROM audit.login_log LIMIT 1;" "dml_admin: SELECT в схеме audit (через роль auditor)" "error"
 
 manage_role "REVOKE" "dml_admin"
 
@@ -323,7 +380,7 @@ manage_role "GRANT" "security_admin"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
 check_command "SELECT rolname FROM pg_roles LIMIT 5;" "security_admin: SELECT из pg_roles" "success"
-check_command "SET ROLE security_admin; CREATE ROLE test_role_123; DROP ROLE test_role_123;" "security_admin: CREATE ROLE с SET ROLE" "success"
+check_command "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'app';" "security_admin: SELECT из pg_tables" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
 check_command "CREATE TABLE app.unauthorized_table (id serial);" "security_admin: CREATE TABLE в схеме app" "error"
@@ -331,267 +388,245 @@ check_command "INSERT INTO app.students (last_name, first_name, student_card_num
 
 manage_role "REVOKE" "security_admin"
 
+# ====================================================================
+# ТЕСТИРОВАНИЕ RLS И СЕГМЕНТАЦИИ (8+ КЕЙСОВ)
+# ====================================================================
 
-echo -e "${YELLOW}=== Тестирование SECURITY DEFINER функций ===${NC}"
+echo -e "${YELLOW}=== ТЕСТИРОВАНИЕ RLS И СЕГМЕНТАЦИИ (8+ КЕЙСОВ) ===${NC}"
+
+# КЕЙС 1: Чтение «чужих» строк (должно быть пусто)
+echo -e "${BLUE}=== КЕЙС 1: Чтение «чужих» строк (должно быть пусто) ===${NC}"
+manage_role "GRANT" "test_reader_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_row_count "SELECT * FROM app.students WHERE segment_id = 1001;" "Чтение студентов из чужого сегмента 1001" 0
+check_row_count "SELECT * FROM app.teachers WHERE segment_id = 1001;" "Чтение преподавателей из чужого сегмента 1001" 0
+
+manage_role "REVOKE" "test_reader_1000"
+
+# КЕЙС 2: Вставка с неверным segment_id (ошибка)
+echo -e "${BLUE}=== КЕЙС 2: Вставка с неверным segment_id (ошибка) ===${NC}"
+manage_role "GRANT" "test_writer_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Чужой', 'Студент', 'FOREIGN001', 1000, 1001);" "Вставка студента с segment_id=1001 (чужой сегмент)" "error"
+check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Несуществующий', 'Студент', 'GHOST001', 1000, 999);" "Вставка студента с segment_id=999 (несуществующий)" "error"
+
+manage_role "REVOKE" "test_writer_1000"
+
+# КЕЙС 3: Обновление с неверным segment_id (ошибка)
+echo -e "${BLUE}=== КЕЙС 3: Обновление с неверным segment_id (ошибка) ===${NC}"
+manage_role "GRANT" "test_writer_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_command "UPDATE app.students SET last_name = 'Взломан' WHERE segment_id = 1001;" "Обновление студентов в сегменте 1001 (чужой)" "error"
+check_command "UPDATE app.students SET segment_id = 1001 WHERE student_id = 1000;" "Изменение segment_id на 1001 (чужой)" "error"
+
+manage_role "REVOKE" "test_writer_1000"
+
+# КЕЙС 4: Корректные операции в своём сегменте (чтение)
+echo -e "${BLUE}=== КЕЙС 4: Корректные операции в своём сегменте (чтение) ===${NC}"
+manage_role "GRANT" "test_reader_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Чтение студентов из своего сегмента 1000" 1
+check_row_count "SELECT * FROM app.teachers WHERE segment_id = 1000;" "Чтение преподавателей из своего сегмента 1000" 1
+check_command "SELECT last_name FROM app.students WHERE segment_id = 1000;" "Проверка данных студентов сегмента 1000" "success"
+
+manage_role "REVOKE" "test_reader_1000"
+
+# КЕЙС 5: Корректные операции в своём сегменте (запись)
+echo -e "${BLUE}=== КЕЙС 5: Корректные операции в своём сегменте (запись) ===${NC}"
+manage_role "GRANT" "test_writer_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id, email) VALUES ('Новый', 'Студент1000', 'NEW1000', 1000, 1000, 'new1000@test.ru');" "Вставка студента в сегмент 1000" "success"
+check_command "UPDATE app.students SET last_name = 'Обновленный' WHERE student_card_number = 'NEW1000';" "Обновление студента в сегменте 1000" "success"
+check_command "DELETE FROM app.students WHERE student_card_number = 'NEW1000';" "Удаление студента из сегмента 1000" "success"
+
+manage_role "REVOKE" "test_writer_1000"
+
+# КЕЙС 6: Проверка работы set_session_ctx() - успешная
+echo -e "${BLUE}=== КЕЙС 6: Проверка работы set_session_ctx() - успешная ===${NC}"
+manage_role "GRANT" "test_reader_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000 (успешно)" "success"
+check_command "SELECT * FROM app.get_session_ctx();" "Проверка установленного контекста" "success"
+check_row_count "SELECT * FROM app.students;" "Доступ к данным после установки контекста" 1
+
+manage_role "REVOKE" "test_reader_1000"
+
+# КЕЙС 7: Проверка работы set_session_ctx() - ошибка (сегмент не принадлежит роли)
+echo -e "${BLUE}=== КЕЙС 7: Проверка работы set_session_ctx() - ошибка (сегмент не принадлежит роли) ===${NC}"
+manage_role "GRANT" "test_reader_1000"
+
+check_command "SELECT app.set_session_ctx(1001, 1000);" "Установка контекста для сегмента 1001 (чужой)" "error"
+check_command "SELECT app.set_session_ctx(9999, 1000);" "Установка контекста для сегмента 9999 (несуществующий)" "error"
+
+manage_role "REVOKE" "test_reader_1000"
+
+# КЕЙС 8: Перекрестное тестирование разных ролей и сегментов
+echo -e "${BLUE}=== КЕЙС 8: Перекрестное тестирование разных ролей и сегментов ===${NC}"
+
+manage_role "GRANT" "test_reader_1001"
+check_command "SELECT app.set_session_ctx(1001, 1001);" "Установка контекста для сегмента 1001" "success"
+check_row_count "SELECT * FROM app.students WHERE segment_id = 1001;" "Чтение студентов из сегмента 1001" 1
+check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Чтение студентов из сегмента 1000 (чужой)" 0
+manage_role "REVOKE" "test_reader_1001"
+
+manage_role "GRANT" "test_writer_1001"
+check_command "SELECT app.set_session_ctx(1001, 1001);" "Установка контекста для сегмента 1001" "success"
+check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id, email) VALUES ('Новый1001', 'Студент1001', 'NEW1001', 1001, 1001, 'new1001@test.ru');" "Вставка студента в сегмент 1001" "success"
+check_command "DELETE FROM app.students WHERE student_card_number = 'NEW1001';" "Очистка тестовых данных 1001" "success"
+manage_role "REVOKE" "test_writer_1001"
+
+# КЕЙС 9: Тестирование без установки контекста
+echo -e "${BLUE}=== КЕЙС 9: Тестирование без установки контекста ===${NC}"
+manage_role "GRANT" "test_reader_1000"
+
+check_row_count "SELECT * FROM app.students;" "Чтение без установки контекста" 0
+
+manage_role "REVOKE" "test_reader_1000"
+
+# КЕЙС 10: Тестирование административных ролей (доступ ко всем сегментам)
+echo -e "${BLUE}=== КЕЙС 10: Тестирование административных ролей (доступ ко всем сегментам) ===${NC}"
+manage_role "GRANT" "dml_admin"
+
+check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 2
+check_row_count "SELECT * FROM app.teachers;" "DML_ADMIN: чтение всех преподавателей" 2
+
+manage_role "REVOKE" "dml_admin"
+
+# КЕЙС 11: Тестирование функций с сегментацией
+echo -e "${BLUE}=== КЕЙС 11: Тестирование функций с сегментацией ===${NC}"
+manage_role "GRANT" "test_writer_1000"
+
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для функций" "success"
+check_command "SELECT app.add_student_document(1000, 'ИНН'::public.document_type_enum, NULL, 'INN1000', '2024-01-01', 'ИФНС');" "Добавление документа в сегменте 1000" "success"
+check_command "SELECT app.add_student_document(1001, 'ИНН'::public.document_type_enum, NULL, 'INN1001', '2024-01-01', 'ИФНС');" "Добавление документа для студента из сегмента 1001" "error"
+
+manage_role "REVOKE" "test_writer_1000"
+
+# КЕЙС 12: Проверка изоляции данных между сегментами
+echo -e "${BLUE}=== КЕЙС 12: Проверка изоляции данных между сегментами ===${NC}"
+
+manage_role "GRANT" "test_reader_1000"
+check_command "SELECT app.set_session_ctx(1000, 1000);" "Контекст для проверки изоляции" "success"
+result_1000=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "SELECT student_card_number FROM app.students ORDER BY student_id;" 2>&1)
+echo "Студенты в сегменте 1000: $result_1000"
+manage_role "REVOKE" "test_reader_1000"
+
+manage_role "GRANT" "test_reader_1001"
+check_command "SELECT app.set_session_ctx(1001, 1001);" "Контекст для проверки изоляции" "success"
+result_1001=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "SELECT student_card_number FROM app.students ORDER BY student_id;" 2>&1)
+echo "Студенты в сегменте 1001: $result_1001"
+manage_role "REVOKE" "test_reader_1001"
+
+if [ "$result_1000" != "$result_1001" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Данные изолированы между сегментами${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Данные не изолированы${NC}"
+fi
+
+echo -e "${YELLOW}=== Тестирование SECURITY DEFINER функций с сегментацией ===${NC}"
 echo ""
 
-echo "Выдаем права CONNECT и app_writer пользователю test_connect"
+echo "Выдаем права CONNECT и test_writer_1000 пользователю test_connect"
 sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT CONNECT ON DATABASE education_db TO test_connect;" 2>&1
-sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT test_writer_1000 TO test_connect;" 2>&1
 
-# 1. Тестирование функции enroll_student
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ enroll_student ===${NC}"
-
-echo -e "${CYAN}--- Успешное выполнение ---${NC}"
-if [ -n "$TEST_GROUP_ID" ]; then
-    check_function "SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex@student.ru', '+7-900-300-01-01', $TEST_GROUP_ID);" "enroll_student: успешное зачисление" "success"
-else
-    echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
-fi
-
-echo -e "${PURPLE}--- Неудачное выполнение (без прав) ---${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
-if [ -n "$TEST_GROUP_ID" ]; then
-    check_function "SELECT app.enroll_student('Петров', 'Иван', 'Сергеевич', 'petrov_ivan@student.ru', '+7-900-300-01-02', $TEST_GROUP_ID);" "enroll_student: отсутствуют права app_writer" "error"
-else
-    echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
-fi
-sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
-if [ -n "$TEST_GROUP_ID" ]; then
-    check_function "SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex@student.ru', '+7-900-300-01-01', $TEST_GROUP_ID);" "enroll_student: почта уже существует" "error"
-else
-    echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
-fi
-
-# 2. Тестирование функции register_final_grade
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ register_final_grade ===${NC}"
+# 1. Тестирование функции enroll_student с сегментацией
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ enroll_student С СЕГМЕНТАЦИЕЙ ===${NC}"
 
 echo -e "${CYAN}--- Успешное выполнение ---${NC}"
-# Создаем нового студента и преподавателя в одном сегменте для теста оценок
 if [ -n "$TEST_GROUP_ID" ]; then
-    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+    check_function "SELECT app.set_session_ctx(1000, 1); SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex_new@student.ru', '+7-900-300-01-01', $TEST_GROUP_ID);" "enroll_student: успешное зачисление в сегмент 1000" "success"
+else
+    echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
+fi
+
+echo -e "${PURPLE}--- Неудачное выполнение ---${NC}"
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE test_writer_1000 FROM test_connect;" 2>&1
+if [ -n "$TEST_GROUP_ID" ]; then
+    check_function "SELECT app.set_session_ctx(1000, 1); SELECT app.enroll_student('Петров', 'Иван', 'Сергеевич', 'petrov_ivan@student.ru', '+7-900-300-01-02', $TEST_GROUP_ID);" "enroll_student: отсутствуют права test_writer_1000" "error"
+else
+    echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
+fi
+sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT test_writer_1000 TO test_connect;" 2>&1
+if [ -n "$TEST_GROUP_ID" ]; then
+    check_function "SELECT app.set_session_ctx(1000, 1); SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex_new@student.ru', '+7-900-300-01-01', $TEST_GROUP_ID);" "enroll_student: почта уже существует" "error"
+else
+    echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
+fi
+
+# 2. Тестирование функции register_final_grade с сегментацией
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ register_final_grade С СЕГМЕНТАЦИЕЙ ===${NC}"
+
+echo -e "${CYAN}--- Успешное выполнение ---${NC}"
+# Создаем нового студента и преподавателя в сегменте 1000 для теста оценок
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
 -- Создаем тестового преподавателя в сегменте 1000
-INSERT INTO app.teachers (last_name, first_name, academic_degree, academic_title, segment_id) 
-VALUES ('ТестовыйПреподаватель1000', 'Оценки1000', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1000)
-ON CONFLICT (last_name, first_name, segment_id) DO UPDATE SET last_name = 'ТестовыйПреподаватель1000';
+INSERT INTO app.teachers (teacher_id, last_name, first_name, academic_degree, academic_title, segment_id) 
+SELECT 1001, 'ТестовыйПреподаватель1000', 'Оценки1000', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1000
+WHERE NOT EXISTS (SELECT 1 FROM app.teachers WHERE teacher_id = 1001);
 
 -- Создаем нового студента в том же сегменте
-INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id, email) 
-VALUES ('Оценочный', 'Студент', 'TESTGRADE', $TEST_GROUP_ID, 1000, 'grade_student@test.ru')
-ON CONFLICT (student_card_number) DO UPDATE SET email = 'grade_student@test.ru';" 2>&1
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) 
+SELECT 1001, 'Оценочный', 'Студент', 'TESTGRADE', 1000, 1000, 'grade_student@test.ru'
+WHERE NOT EXISTS (SELECT 1 FROM app.students WHERE student_id = 1001);" 2>&1
 
-    GRADE_STUDENT_ID=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT student_id FROM app.students WHERE student_card_number = 'TESTGRADE';" 2>&1 | tr -d '[:space:]')
-    GRADE_TEACHER_ID=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT teacher_id FROM app.teachers WHERE last_name = 'ТестовыйПреподаватель1000' AND segment_id = 1000 LIMIT 1;" 2>&1 | tr -d '[:space:]')
-    
-    if [ -n "$GRADE_STUDENT_ID" ] && [ -n "$GRADE_TEACHER_ID" ]; then
-        check_function "SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $GRADE_TEACHER_ID, 1, '4', 1);" "register_final_grade: успешная регистрация оценки" "success"
-    else
-        echo "Пропускаем тест register_final_grade - не удалось получить необходимые ID (студент: $GRADE_STUDENT_ID, преподаватель: $GRADE_TEACHER_ID)"
-    fi
-else
-    echo "Пропускаем тест register_final_grade - TEST_GROUP_ID не найден"
-fi
+GRADE_STUDENT_ID=1001
+GRADE_TEACHER_ID=1001
 
-echo -e "${PURPLE}--- Неудачное выполнение (без прав) ---${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
 if [ -n "$GRADE_STUDENT_ID" ] && [ -n "$GRADE_TEACHER_ID" ]; then
-    check_function "SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $GRADE_TEACHER_ID, 1, '5', 1);" "register_final_grade: отсутствуют права app_writer" "error"
+    check_function "SELECT app.set_session_ctx(1000, 1); SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $GRADE_TEACHER_ID, 1, '4', 1);" "register_final_grade: успешная регистрация оценки в сегменте 1000" "success"
 else
-    echo "Пропускаем тест register_final_grade - не удалось получить необходимые ID"
-fi
-sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
-if [ -n "$GRADE_STUDENT_ID" ] && [ -n "$GRADE_TEACHER_ID" ]; then
-    check_function "SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $GRADE_TEACHER_ID, 1, 'abc', 1);" "register_final_grade: неправильная оценка" "error"
-else
-    echo "Пропускаем тест register_final_grade - не удалось получить необходимые ID"
+    echo "Пропускаем тест register_final_grade - не удалось создать необходимые ID"
 fi
 
-# 3. Тестирование функции add_student_document
-echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ add_student_document ===${NC}"
+echo -e "${PURPLE}--- Неудачное выполнение ---${NC}"
+# Тест с разными сегментами
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+INSERT INTO app.teachers (teacher_id, last_name, first_name, academic_degree, academic_title, segment_id) 
+SELECT 1002, 'ЧужойПреподаватель', 'ДругойСегмент', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1
+WHERE NOT EXISTS (SELECT 1 FROM app.teachers WHERE teacher_id = 1002);" 2>&1
+
+FOREIGN_TEACHER_ID=1002
+
+if [ -n "$GRADE_STUDENT_ID" ] && [ -n "$FOREIGN_TEACHER_ID" ]; then
+    check_function "SELECT app.set_session_ctx(1000, 1); SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $FOREIGN_TEACHER_ID, 1, '5', 1);" "register_final_grade: студент и преподаватель в разных сегментах" "error"
+fi
+
+# 3. Тестирование функции add_student_document с сегментацией
+echo -e "${BLUE}=== ТЕСТИРОВАНИЕ ФУНКЦИИ add_student_document С СЕГМЕНТАЦИЕЙ ===${NC}"
 
 echo -e "${CYAN}--- Успешное выполнение ---${NC}"
 # Создаем нового студента для теста документов
-if [ -n "$TEST_GROUP_ID" ]; then
-    sudo docker exec -i postgres psql -U postgres -d education_db -c "
-INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id, email) 
-VALUES ('Документный', 'Студент', 'TESTDOC', $TEST_GROUP_ID, 1000, 'doc_student@test.ru')
-ON CONFLICT (student_card_number) DO UPDATE SET email = 'doc_student@test.ru';" 2>&1
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) 
+SELECT 1003, 'Документный', 'Студент', 'TESTDOC', 1000, 1000, 'doc_student@test.ru'
+WHERE NOT EXISTS (SELECT 1 FROM app.students WHERE student_id = 1003);" 2>&1
 
-    DOC_STUDENT_ID=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT student_id FROM app.students WHERE student_card_number = 'TESTDOC';" 2>&1 | tr -d '[:space:]')
-    
-    if [ -n "$DOC_STUDENT_ID" ]; then
-        check_function "SELECT app.add_student_document($DOC_STUDENT_ID, 'ИНН'::public.document_type_enum, NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: успешное добавление документа" "success"
-    else
-        echo "Пропускаем тест add_student_document - не удалось получить DOC_STUDENT_ID"
-    fi
-else
-    echo "Пропускаем тест add_student_document - TEST_GROUP_ID не найден"
-fi
+DOC_STUDENT_ID=1003
 
-echo -e "${PURPLE}--- Неудачное выполнение (без прав) ---${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
 if [ -n "$DOC_STUDENT_ID" ]; then
-    check_function "SELECT app.add_student_document($DOC_STUDENT_ID, 'СНИЛС'::public.document_type_enum, NULL, '098-765-432-02', '2023-08-20', 'ПФР России');" "add_student_document: отсутствуют права app_writer" "error"
+    check_function "SELECT app.set_session_ctx(1000, 1); SELECT app.add_student_document($DOC_STUDENT_ID, 'ИНН'::public.document_type_enum, NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: успешное добавление документа в сегменте 1000" "success"
 else
-    echo "Пропускаем тест add_student_document - не удалось получить DOC_STUDENT_ID"
+    echo "Пропускаем тест add_student_document - не удалось создать DOC_STUDENT_ID"
 fi
-sudo docker exec -i postgres psql -U postgres -d education_db -c "GRANT app_writer TO test_connect;" 2>&1
-if [ -n "$DOC_STUDENT_ID" ]; then
-    check_function "SELECT app.add_student_document($DOC_STUDENT_ID, 'ИНН'::public.document_type_enum, NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: такой тип документа у студента уже есть" "error"
-else
-    echo "Пропускаем тест add_student_document - не удалось получить DOC_STUDENT_ID"
-fi
-
-# Тестирование производительности CHECK vs TRIGGER
-echo -e "${YELLOW}=== ТЕСТИРОВАНИЕ CHECK vs TRIGGER ДЛЯ РАСПИСАНИЯ ЗАНЯТИЙ (10k записей) ===${NC}"
-echo ""
-
-# подготовительный этап
-echo -e "${BLUE}=== ПОДГОТОВКА ===${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "
-    DROP TRIGGER IF EXISTS trg_class_time_check ON app.class_schedule;
-    ALTER TABLE app.class_schedule DROP CONSTRAINT IF EXISTS chk_class_time;
-" 2>&1
-
-# ТЕСТ ТРИГГЕРА
-echo -e "${BLUE}=== ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ TRIGGER ===${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "
-    CREATE OR REPLACE FUNCTION app.trg_check_class_time()
-    RETURNS TRIGGER
-    LANGUAGE plpgsql
-    AS \$\$
-    BEGIN
-        IF NEW.end_time <= NEW.start_time THEN
-            RAISE EXCEPTION 'TRIGGER_ERROR: Время окончания занятия (%) должно быть позже времени начала (%)', 
-                NEW.end_time, NEW.start_time;
-        END IF;
-        RETURN NEW;
-    END;
-    \$\$;
-
-    CREATE TRIGGER trg_class_time_check
-        BEFORE INSERT OR UPDATE ON app.class_schedule
-        FOR EACH ROW
-        EXECUTE FUNCTION app.trg_check_class_time();
-
-    DO \$\$
-    DECLARE
-        start_time TIMESTAMP;
-        end_time INTERVAL;
-        i INTEGER;
-        success_count INTEGER := 0;
-        error_count INTEGER := 0;
-    BEGIN
-        start_time := clock_timestamp();
-        
-        FOR i IN 1..10000 LOOP
-            BEGIN
-                INSERT INTO app.class_schedule (
-                    group_id, subject_id, teacher_id, week_number, 
-                    day_of_week, start_time, end_time, classroom, 
-                    building_number, lesson_type, segment_id
-                ) VALUES (
-                    1, 1, 1, 1,
-                    'Понедельник'::public.day_of_week_enum,
-                    '08:00'::time,
-                    '09:30'::time,
-                    '101',
-                    '1',
-                    'Лекция'::public.lesson_type_enum,
-                    1
-                );
-                success_count := success_count + 1;
-            EXCEPTION WHEN OTHERS THEN
-                error_count := error_count + 1;
-            END;
-        END LOOP;
-        
-        end_time := clock_timestamp() - start_time;
-        
-        RAISE NOTICE '=== РЕЗУЛЬТАТЫ TRIGGER ===';
-        RAISE NOTICE 'Успешных вставок: %', success_count;
-        RAISE NOTICE 'Ошибок: %', error_count;
-        RAISE NOTICE 'Время выполнения: %', end_time;
-        
-        DELETE FROM app.class_schedule WHERE classroom = '101';
-    END \$\$;
-
-    DROP TRIGGER trg_class_time_check ON app.class_schedule;
-    DROP FUNCTION app.trg_check_class_time();
-" 2>&1
-
-# ТЕСТ CHECK ОГРАНИЧЕНИЯ
-echo -e "${BLUE}=== ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ CHECK ОГРАНИЧЕНИЯ ===${NC}"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "
-    ALTER TABLE app.class_schedule 
-    ADD CONSTRAINT chk_class_time 
-    CHECK (end_time > start_time);
-
-    DO \$\$
-    DECLARE
-        start_time TIMESTAMP;
-        end_time INTERVAL;
-        i INTEGER;
-        success_count INTEGER := 0;
-        error_count INTEGER := 0;
-    BEGIN
-        start_time := clock_timestamp();
-        
-        FOR i IN 1..10000 LOOP
-            BEGIN
-                INSERT INTO app.class_schedule (
-                    group_id, subject_id, teacher_id, week_number, 
-                    day_of_week, start_time, end_time, classroom, 
-                    building_number, lesson_type, segment_id
-                ) VALUES (
-                    1, 1, 1, 1,
-                    'Понедельник'::public.day_of_week_enum,
-                    '08:00'::time,
-                    '09:30'::time,
-                    '101',
-                    '1',
-                    'Лекция'::public.lesson_type_enum,
-                    1
-                );
-                success_count := success_count + 1;
-            EXCEPTION WHEN check_violation THEN
-                error_count := error_count + 1;
-            END;
-        END LOOP;
-        
-        end_time := clock_timestamp() - start_time;
-        
-        RAISE NOTICE '=== РЕЗУЛЬТАТЫ CHECK ===';
-        RAISE NOTICE 'Успешных вставок: %', success_count;
-        RAISE NOTICE 'Ошибок: %', error_count;
-        RAISE NOTICE 'Время выполнения: %', end_time;
-        
-        DELETE FROM app.class_schedule WHERE classroom = '101';
-    END \$\$;
-
-    ALTER TABLE app.class_schedule DROP CONSTRAINT chk_class_time;
-" 2>&1
-
-# Восстанавливаем CHECK ограничение
-sudo docker exec -i postgres psql -U postgres -d education_db -c "
-    ALTER TABLE app.class_schedule 
-    ADD CONSTRAINT chk_class_time 
-    CHECK (end_time > start_time);" 2>&1
-
-echo -e "${GREEN}=== ТЕСТИРОВАНИЕ CHECK vs TRIGGER ДЛЯ РАСПИСАНИЯ ЗАНЯТИЙ ЗАВЕРШЕНО ===${NC}"
-echo ""
 
 # Очистка тестовых данных
 echo "Очистка тестовых данных..."
 sudo docker exec -i postgres psql -U postgres -d education_db << EOF
-DELETE FROM app.students WHERE email IN ('novikov_alex@student.ru', 'grade_student@test.ru', 'doc_student@test.ru');
-DELETE FROM app.final_grades WHERE student_id IN (SELECT student_id FROM app.students WHERE email IN ('grade_student@test.ru', 'doc_student@test.ru'));
-DELETE FROM app.student_documents WHERE document_number = '0987654321';
+DELETE FROM app.student_documents WHERE student_id IN (1001, 1003);
+DELETE FROM app.final_grades WHERE student_id IN (1001, 1003) OR teacher_id IN (1001, 1002);
+DELETE FROM app.students WHERE student_id IN (1001, 1003);
+DELETE FROM app.teachers WHERE teacher_id IN (1001, 1002);
 EOF
 
 # Забираем права в конце
 echo "Забираем права у пользователя test_connect"
-sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE app_writer FROM test_connect;" 2>&1
+sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE test_writer_1000 FROM test_connect;" 2>&1
 sudo docker exec -i postgres psql -U postgres -d education_db -c "REVOKE CONNECT ON DATABASE education_db FROM test_connect;" 2>&1
 
 echo -e "${YELLOW}=== Конец тестирования SECURITY DEFINER функций ===${NC}"

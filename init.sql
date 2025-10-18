@@ -1375,7 +1375,7 @@ INSERT INTO app.role_segments (role_name, segment_id) VALUES
 ('nstu_writer', 7),
 ('nstu_owner', 7);
 
--- Функция для получения segment_id текущего пользователя
+-- Улучшенная функция get_current_segment_id
 CREATE OR REPLACE FUNCTION app.get_current_segment_id()
 RETURNS INT
 LANGUAGE plpgsql
@@ -1384,11 +1384,12 @@ AS $$
 DECLARE
     v_segment_id INT;
     v_setting_value TEXT;
+    v_role_segment_id INT;
 BEGIN
-    -- Пытаемся получить segment_id из GUC
+    -- Приоритет 1: Пытаемся получить segment_id из GUC (явно установленный контекст)
     BEGIN
         v_setting_value := current_setting('app.segment_id', true);
-        IF v_setting_value IS NOT NULL AND v_setting_value != '' THEN
+        IF v_setting_value IS NOT NULL AND v_setting_value != '' AND v_setting_value ~ '^\d+$' THEN
             RETURN v_setting_value::INT;
         END IF;
     EXCEPTION
@@ -1396,16 +1397,33 @@ BEGIN
             NULL; -- Настройка не установлена, продолжаем
     END;
     
-    -- Если GUC не установлен, ищем по имени роли
-    SELECT segment_id INTO v_segment_id
+    -- Приоритет 2: Ищем по имени роли в таблице role_segments
+    SELECT segment_id INTO v_role_segment_id
     FROM app.role_segments
     WHERE role_name = current_user;
     
-    RETURN v_segment_id;
+    IF v_role_segment_id IS NOT NULL THEN
+        RETURN v_role_segment_id;
+    END IF;
+    
+    -- Приоритет 3: Для административных ролей возвращаем NULL (доступ ко всем данным)
+    IF EXISTS(
+        SELECT 1 FROM pg_roles 
+        WHERE rolname = current_user 
+        AND (
+            rolname IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres')
+            OR rolsuper = true
+        )
+    ) THEN
+        RETURN NULL; -- NULL означает доступ ко всем сегментам
+    END IF;
+    
+    -- Если ничего не найдено, возвращаем -1 (нет доступа)
+    RETURN -1;
 END;
 $$;
 
--- Функция проверки доступа к сегменту
+-- Улучшенная функция check_segment_access
 CREATE OR REPLACE FUNCTION app.check_segment_access(p_segment_id INT)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -1415,21 +1433,41 @@ DECLARE
     v_current_segment_id INT;
     v_is_admin BOOLEAN;
 BEGIN
-    -- Административные роли имеют доступ ко всем данным
+    -- Проверяем административные привилегии
     SELECT EXISTS(
         SELECT 1 FROM pg_roles 
         WHERE rolname = current_user 
-        AND rolname IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres')
+        AND (
+            rolname IN ('ddl_admin', 'dml_admin', 'security_admin', 'postgres')
+            OR rolsuper = true
+            OR rolname LIKE '%_admin'
+        )
     ) INTO v_is_admin;
     
+    -- Административные роли имеют доступ ко всем данным
     IF v_is_admin THEN
         RETURN TRUE;
     END IF;
     
-    -- Для обычных ролей проверяем соответствие сегментов
+    -- Получаем текущий segment_id
     v_current_segment_id := app.get_current_segment_id();
     
-    RETURN v_current_segment_id IS NOT NULL AND v_current_segment_id = p_segment_id;
+    -- Если get_current_segment_id вернул -1, доступ запрещен
+    IF v_current_segment_id = -1 THEN
+        RETURN FALSE;
+    END IF;
+    
+    -- Если get_current_segment_id вернул NULL (админ), доступ разрешен
+    IF v_current_segment_id IS NULL THEN
+        RETURN TRUE;
+    END IF;
+    
+    -- Для обычных ролей проверяем соответствие сегментов
+    RETURN v_current_segment_id = p_segment_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- В случае ошибки запрещаем доступ (безопасный подход)
+        RETURN FALSE;
 END;
 $$;
 
@@ -1647,7 +1685,8 @@ $$;
 
 GRANT EXECUTE ON FUNCTION app.set_session_ctx TO app_reader, app_writer, app_owner, ddl_admin, dml_admin;
 GRANT EXECUTE ON FUNCTION app.get_session_ctx TO app_reader, app_writer, app_owner, ddl_admin, dml_admin;
-GRANT EXECUTE ON FUNCTION app.get_current_segment_id TO app_reader, app_writer, app_owner, ddl_admin, dml_admin;
+GRANT EXECUTE ON FUNCTION app.get_current_segment_id TO PUBLIC;
+GRANT EXECUTE ON FUNCTION app.check_segment_access TO PUBLIC;
 
 -- Создание конкретных ролей для каждого сегмента
 -- НИУ ВШЭ - Москва
