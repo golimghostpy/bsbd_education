@@ -431,11 +431,11 @@ check_command "SELECT COUNT(*) FROM app.class_schedule LIMIT 5;" "auditor: до�
 check_command "SELECT COUNT(*) FROM audit.login_log LIMIT 5;" "auditor: доступ к логам авторизации" "success"
 check_command "SELECT COUNT(*) FROM audit.function_calls LIMIT 5;" "auditor: доступ к логам вызовов функций" "success"
 
-# Сравниваем: обычный пользователь vs auditor
-echo -e "${BLUE}=== СРАВНЕНИЕ: ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ vs AUDITOR ===${NC}"
-
 # Возвращаем test_connect к обычной роли с доступом только к сегменту 1000
 reset_test_connect
+
+# Сравниваем: обычный пользователь vs auditor
+echo -e "${BLUE}=== СРАВНЕНИЕ: ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ vs AUDITOR ===${NC}"
 set_test_connect_segment 1000
 setup_test_connect_basic
 
@@ -566,6 +566,7 @@ check_row_count "SELECT * FROM app.teachers WHERE teacher_id = 1000;" "Чтен�
 reset_test_connect
 
 # КЕЙС 4: Корректные операции в своём сегменте (запись)
+echo -e "${BLUE}=== КЕЙС 4: Корректные операции в своём сегменте (запись) ===${NC}"
 setup_test_connect_basic
 set_test_connect_segment 1000
 # Используем уникальные данные для вставки
@@ -585,7 +586,7 @@ setup_test_connect_basic
 
 check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000 (успешно)" "success"
 check_command "SELECT * FROM app.get_session_ctx();" "Проверка установленного контекста" "success"
-check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Доступ к данным после установки контекста" 2
+check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Доступ к данным после установки контекста" 1
 
 reset_test_connect
 
@@ -600,6 +601,7 @@ check_command "SELECT app.set_session_ctx(9999, 1000);" "Установка ко
 reset_test_connect
 
 # КЕЙС 7: Перекрестное тестирование разных сегментов
+echo -e "${BLUE}=== КЕЙС 7: Перекрестное тестирование разных сегментов ===${NC}"
 setup_test_connect_basic
 set_test_connect_segment 1001
 timestamp2=$(date +%s)
@@ -624,7 +626,7 @@ setup_test_connect_basic
 grant_additional_role_to_test_connect "dml_admin"
 
 # Администраторы видят все данные без установки контекста
-check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 18
+check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 16
 check_row_count "SELECT * FROM app.teachers;" "DML_ADMIN: чтение всех преподавателей" 16
 
 reset_test_connect

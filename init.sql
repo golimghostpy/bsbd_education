@@ -330,8 +330,7 @@ CREATE INDEX idx_teachers_name ON app.teachers(last_name, first_name);
 CREATE TABLE ref.segments (
     segment_id SERIAL PRIMARY KEY,
     segment_name VARCHAR(200) NOT NULL UNIQUE,
-    description TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    description TEXT
 );
 
 -- 2. Добавляем segment_id в ключевые таблицы app.*
@@ -971,123 +970,6 @@ EXCEPTION
 END;
 $$;
 
--- 1. Функция регистрации итоговой оценки
-CREATE OR REPLACE FUNCTION app.register_final_grade(
-    p_student_id INT,
-    p_subject_id INT, 
-    p_teacher_id INT,
-    p_final_grade_type_id INT,
-    p_final_grade_value VARCHAR(10),
-    p_semester INT
-)
-RETURNS INT
-SECURITY DEFINER
-SET search_path = 'app, ref, public'
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_grade_id INT;
-    v_student_segment_id INT;
-    v_teacher_segment_id INT;
-    v_subject_exists BOOLEAN;
-    v_grade_type_exists BOOLEAN;
-    v_allowed_values VARCHAR(255);
-BEGIN
-    -- Проверка существования и получение сегментов
-    SELECT segment_id INTO v_student_segment_id 
-    FROM app.students 
-    WHERE student_id = p_student_id;
-    
-    IF v_student_segment_id IS NULL THEN
-        RAISE EXCEPTION 'Студент с ID % не найден', p_student_id;
-    END IF;
-    
-    SELECT segment_id INTO v_teacher_segment_id 
-    FROM app.teachers 
-    WHERE teacher_id = p_teacher_id;
-    
-    IF v_teacher_segment_id IS NULL THEN
-        RAISE EXCEPTION 'Преподаватель с ID % не найден', p_teacher_id;
-    END IF;
-    
-    -- Проверка принадлежности к одному сегменту
-    IF v_student_segment_id != v_teacher_segment_id THEN
-        RAISE EXCEPTION 'Студент и преподаватель принадлежат разным сегментам данных';
-    END IF;
-    
-    SELECT EXISTS(SELECT 1 FROM ref.subjects WHERE subject_id = p_subject_id) INTO v_subject_exists;
-    SELECT EXISTS(SELECT 1 FROM ref.final_grade_types WHERE final_grade_type_id = p_final_grade_type_id) INTO v_grade_type_exists;
-    
-    IF NOT v_subject_exists THEN
-        RAISE EXCEPTION 'Дисциплина с ID % не найдена', p_subject_id;
-    END IF;
-    IF NOT v_grade_type_exists THEN
-        RAISE EXCEPTION 'Тип оценки с ID % не найден', p_final_grade_type_id;
-    END IF;
-    
-    -- Проверка допустимых значений оценки
-    SELECT allowed_values INTO v_allowed_values 
-    FROM ref.final_grade_types 
-    WHERE final_grade_type_id = p_final_grade_type_id;
-    
-    IF v_allowed_values NOT LIKE '%' || p_final_grade_value || '%' THEN
-        RAISE EXCEPTION 'Оценка "%" недопустима для выбранной системы оценивания. Допустимые значения: %', 
-            p_final_grade_value, v_allowed_values;
-    END IF;
-    
-    -- Проверка семестра
-    IF p_semester <= 0 THEN
-        RAISE EXCEPTION 'Номер семестра должен быть положительным';
-    END IF;
-    
-    -- Регистрация оценки с сегментом студента
-    INSERT INTO app.final_grades (
-        student_id, subject_id, teacher_id, final_grade_type_id, 
-        final_grade_value, semester, segment_id
-    ) VALUES (
-        p_student_id, p_subject_id, p_teacher_id, p_final_grade_type_id,
-        p_final_grade_value, p_semester, v_student_segment_id
-    ) RETURNING final_grade_id INTO v_grade_id;
-    
-    -- Логирование вызова
-    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
-    VALUES (
-        'register_final_grade',
-        session_user,
-        jsonb_build_object(
-            'student_id', p_student_id,
-            'subject_id', p_subject_id,
-            'teacher_id', p_teacher_id,
-            'final_grade_type_id', p_final_grade_type_id,
-            'final_grade_value', p_final_grade_value,
-            'semester', p_semester
-        ),
-        true
-    );
-    
-    RETURN v_grade_id;
-EXCEPTION
-    WHEN OTHERS THEN
-        -- Логирование ошибки
-        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
-        VALUES (
-            'register_final_grade',
-            session_user,
-            jsonb_build_object(
-                'student_id', p_student_id,
-                'subject_id', p_subject_id,
-                'teacher_id', p_teacher_id,
-                'final_grade_type_id', p_final_grade_type_id,
-                'final_grade_value', p_final_grade_value,
-                'semester', p_semester,
-                'error', SQLERRM
-            ),
-            false
-        );
-        RAISE;
-END;
-$$;
-
 GRANT EXECUTE ON FUNCTION app.register_final_grade TO app_writer, dml_admin;
 
 CREATE OR REPLACE FUNCTION app.add_student_document(
@@ -1349,34 +1231,10 @@ ALTER TABLE app.student_documents FORCE ROW LEVEL SECURITY;
 CREATE TABLE app.role_segments (
     role_name VARCHAR(100) PRIMARY KEY,
     segment_id INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (segment_id) REFERENCES ref.segments(segment_id)
 );
 
--- Заполняем таблицу сопоставления ролей с сегментами
-INSERT INTO app.role_segments (role_name, segment_id) VALUES
-('hse_moscow_reader', 1),
-('hse_moscow_writer', 1),
-('hse_moscow_owner', 1),
-('hse_spb_reader', 2),
-('hse_spb_writer', 2),
-('hse_spb_owner', 2),
-('hse_nn_reader', 3),
-('hse_nn_writer', 3),
-('hse_nn_owner', 3),
-('msu_reader', 4),
-('msu_writer', 4),
-('msu_owner', 4),
-('phystech_reader', 5),
-('phystech_writer', 5),
-('phystech_owner', 5),
-('rudn_reader', 6),
-('rudn_writer', 6),
-('rudn_owner', 6),
-('nstu_reader', 7),
-('nstu_writer', 7),
-('nstu_owner', 7);
-
+-- SEGMENT FUNCTIONS
 -- Функция для получения segment_id из контекста (GUC или резервный путь)
 CREATE OR REPLACE FUNCTION app.get_current_segment_id()
 RETURNS INTEGER
@@ -1457,6 +1315,122 @@ BEGIN
 END;
 $$;
 
+-- SECURE VIEW
+-- Secure View для студентов (только базовая информация)
+CREATE VIEW app.students_secure AS
+SELECT 
+    student_id,
+    last_name,
+    first_name,
+    patronymic,
+    student_card_number,
+    email,
+    phone_number,
+    group_id,
+    status
+FROM app.students
+WHERE app.check_segment_access(segment_id)
+WITH CHECK OPTION;
+
+-- Secure View для документов студентов (только основные данные)
+CREATE VIEW app.student_documents_secure AS
+SELECT 
+    document_id,
+    student_id,
+    document_type,
+    -- НЕ показываем: document_series, document_number (конфиденциально)
+    issue_date,
+    issuing_authority
+FROM app.student_documents
+WHERE app.check_segment_access(segment_id)
+WITH CHECK OPTION;
+
+-- Secure View для преподавателей (базовая контактная информация)
+CREATE VIEW app.teachers_secure AS
+SELECT 
+    teacher_id,
+    last_name,
+    first_name,
+    patronymic,
+    email,
+    phone_number
+    academic_degree, 
+    academic_title
+FROM app.teachers
+WHERE app.check_segment_access(segment_id)
+WITH CHECK OPTION;
+
+-- Secure View для итоговых оценок
+CREATE VIEW app.final_grades_secure AS
+SELECT 
+    final_grade_id,
+    student_id,
+    subject_id,
+    teacher_id,
+    final_grade_type_id,
+    final_grade_value,
+    grade_date,
+    semester
+FROM app.final_grades
+WHERE app.check_segment_access(segment_id)
+WITH CHECK OPTION;
+
+-- Secure View для промежуточных оценок
+CREATE VIEW app.interim_grades_secure AS
+SELECT 
+    interim_grade_id,
+    student_id,
+    subject_id,
+    teacher_id,
+    grade_value,
+    grade_date,
+    grade_description,
+    semester
+FROM app.interim_grades
+WHERE app.check_segment_access(segment_id)
+WITH CHECK OPTION;
+
+-- Права для читателей
+GRANT SELECT ON 
+    app.students_secure,
+    app.student_documents_secure, 
+    app.teachers_secure,
+    app.final_grades_secure,
+    app.interim_grades_secure
+TO app_reader;
+
+-- Права для писателей и админов (SELECT/UPDATE/DELETE)
+GRANT SELECT, UPDATE, DELETE ON 
+    app.students_secure,
+    app.student_documents_secure,
+    app.teachers_secure,
+    app.final_grades_secure,
+    app.interim_grades_secure
+TO app_writer, app_owner, dml_admin;
+
+-- Заполняем таблицу сопоставления ролей с сегментами
+INSERT INTO app.role_segments (role_name, segment_id) VALUES
+('hse_moscow_reader', 1),
+('hse_moscow_writer', 1),
+('hse_moscow_owner', 1),
+('hse_spb_reader', 2),
+('hse_spb_writer', 2),
+('hse_spb_owner', 2),
+('hse_nn_reader', 3),
+('hse_nn_writer', 3),
+('hse_nn_owner', 3),
+('msu_reader', 4),
+('msu_writer', 4),
+('msu_owner', 4),
+('phystech_reader', 5),
+('phystech_writer', 5),
+('phystech_owner', 5),
+('rudn_reader', 6),
+('rudn_writer', 6),
+('rudn_owner', 6),
+('nstu_reader', 7),
+('nstu_writer', 7),
+('nstu_owner', 7);
 
 -- Универсальная политика для SELECT
 CREATE POLICY select_policy ON app.educational_institutions
@@ -1545,14 +1519,12 @@ WITH CHECK (app.check_segment_access(segment_id));
 -- Политики для DELETE (ограниченные)
 CREATE POLICY delete_policy ON app.students
 FOR DELETE USING (
-    app.check_segment_access(segment_id) AND
-    current_user LIKE '%_owner'  -- Только owner-роли могут удалять
+    app.check_segment_access(segment_id)
 );
 
 CREATE POLICY delete_policy ON app.final_grades
 FOR DELETE USING (
-    app.check_segment_access(segment_id) AND
-    current_user LIKE '%_owner'
+    app.check_segment_access(segment_id)
 );
 
 -- политики только для аудитора - полный доступ на чтение ко всем данным
@@ -1665,7 +1637,7 @@ BEGIN
     VALUES (
         'set_session_ctx', 
         v_current_user_name,
-        jsonb_build_object('segment_id', p_segment_id, 'actor_id', p_actor_id),
+        jsonb_build_object('segment_id', p_segment_id),
         true
     );
     
@@ -1675,7 +1647,7 @@ EXCEPTION
         VALUES (
             'set_session_ctx', 
             v_current_user_name,
-            jsonb_build_object('segment_id', p_segment_id, 'actor_id', p_actor_id),
+            jsonb_build_object('segment_id', p_segment_id),
             false
         );
         RAISE;
