@@ -1408,6 +1408,60 @@ GRANT SELECT, UPDATE, DELETE ON
     app.interim_grades_secure
 TO app_writer, app_owner, dml_admin;
 
+-- SECURITY BARRIER VIEW
+-- 1. Статистика студентов по группам - защита от определения состава групп
+CREATE VIEW app.group_stats WITH (security_barrier) AS
+SELECT 
+    group_id,
+    COUNT(*) as total_students,
+    COUNT(*) FILTER (WHERE status = 'Обучается') as active_students,
+    COUNT(*) FILTER (WHERE status = 'Отчислен') as expelled_students,
+    COUNT(*) FILTER (WHERE status = 'Академический отпуск') as academic_leave_students
+FROM app.students
+WHERE app.check_segment_access(segment_id)
+GROUP BY group_id;
+
+-- 2. Статистика успеваемости по предметам - защита от определения оценок конкретных студентов
+CREATE VIEW app.subject_stats WITH (security_barrier) AS
+SELECT 
+    subject_id,
+    semester,
+    COUNT(*) as total_grades,
+    ROUND(AVG(
+        CASE 
+            WHEN final_grade_value = '5' THEN 5
+            WHEN final_grade_value = '4' THEN 4
+            WHEN final_grade_value = '3' THEN 3
+            WHEN final_grade_value = '2' THEN 2
+            WHEN final_grade_value = 'Зачет' THEN 5
+            ELSE NULL
+        END
+    ), 2) as avg_grade,
+    COUNT(*) FILTER (WHERE final_grade_value IN ('5', 'Зачет')) as excellent_grades,
+    COUNT(*) FILTER (WHERE final_grade_value IN ('4', '3')) as good_satisfactory_grades,
+    COUNT(*) FILTER (WHERE final_grade_value IN ('2', 'Незачет')) as failed_grades
+FROM app.final_grades
+WHERE app.check_segment_access(segment_id)
+GROUP BY subject_id, semester;
+
+-- 3. Статистика документов студентов - защита от утечки информации о конкретных документах
+CREATE VIEW app.document_stats WITH (security_barrier) AS
+SELECT 
+    document_type,
+    COUNT(*) as total_documents,
+    COUNT(DISTINCT student_id) as students_with_documents,
+    COUNT(*) FILTER (WHERE document_series IS NOT NULL) as documents_with_series
+FROM app.student_documents
+WHERE app.check_segment_access(segment_id)
+GROUP BY document_type;
+
+-- Даем права только на чтение
+GRANT SELECT ON 
+    app.group_stats,
+    app.subject_stats,
+    app.document_stats
+TO app_reader, app_writer, app_owner, dml_admin, auditor;
+
 -- Заполняем таблицу сопоставления ролей с сегментами
 INSERT INTO app.role_segments (role_name, segment_id) VALUES
 ('hse_moscow_reader', 1),
