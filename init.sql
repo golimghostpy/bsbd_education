@@ -1409,51 +1409,70 @@ GRANT SELECT, UPDATE, DELETE ON
 TO app_writer, app_owner, dml_admin;
 
 -- SECURITY BARRIER VIEW
--- 1. Статистика студентов по группам - защита от определения состава групп
+-- 1. Статистика студентов по группам С УЧЕТОМ СЕГМЕНТОВ
 CREATE VIEW app.group_stats WITH (security_barrier) AS
 SELECT 
-    group_id,
+    sg.group_id,
+    sg.group_name,
+    f.faculty_name,
+    ei.institution_name,
+    seg.segment_name,
     COUNT(*) as total_students,
-    COUNT(*) FILTER (WHERE status = 'Обучается') as active_students,
-    COUNT(*) FILTER (WHERE status = 'Отчислен') as expelled_students,
-    COUNT(*) FILTER (WHERE status = 'Академический отпуск') as academic_leave_students
-FROM app.students
-WHERE app.check_segment_access(segment_id)
-GROUP BY group_id;
+    COUNT(*) FILTER (WHERE s.status = 'Обучается') as active_students,
+    COUNT(*) FILTER (WHERE s.status = 'Отчислен') as expelled_students,
+    COUNT(*) FILTER (WHERE s.status = 'Академический отпуск') as academic_leave_students
+FROM app.students s
+JOIN app.study_groups sg ON s.group_id = sg.group_id
+JOIN app.faculties f ON sg.faculty_id = f.faculty_id
+JOIN app.educational_institutions ei ON f.institution_id = ei.institution_id
+JOIN ref.segments seg ON s.segment_id = seg.segment_id
+WHERE app.check_segment_access(s.segment_id)
+  AND app.check_segment_access(sg.segment_id)
+  AND app.check_segment_access(f.segment_id)
+  AND app.check_segment_access(ei.segment_id)
+GROUP BY sg.group_id, sg.group_name, f.faculty_name, ei.institution_name, seg.segment_name;
 
--- 2. Статистика успеваемости по предметам - защита от определения оценок конкретных студентов
+-- 2. Статистика успеваемости по предметам С УЧЕТОМ СЕГМЕНТОВ
 CREATE VIEW app.subject_stats WITH (security_barrier) AS
 SELECT 
-    subject_id,
-    semester,
+    sub.subject_id,
+    sub.subject_name,
+    fg.semester,
+    seg.segment_name,
     COUNT(*) as total_grades,
     ROUND(AVG(
         CASE 
-            WHEN final_grade_value = '5' THEN 5
-            WHEN final_grade_value = '4' THEN 4
-            WHEN final_grade_value = '3' THEN 3
-            WHEN final_grade_value = '2' THEN 2
-            WHEN final_grade_value = 'Зачет' THEN 5
+            WHEN fg.final_grade_value = '5' THEN 5
+            WHEN fg.final_grade_value = '4' THEN 4
+            WHEN fg.final_grade_value = '3' THEN 3
+            WHEN fg.final_grade_value = '2' THEN 2
+            WHEN fg.final_grade_value = 'Зачет' THEN 5
             ELSE NULL
         END
     ), 2) as avg_grade,
-    COUNT(*) FILTER (WHERE final_grade_value IN ('5', 'Зачет')) as excellent_grades,
-    COUNT(*) FILTER (WHERE final_grade_value IN ('4', '3')) as good_satisfactory_grades,
-    COUNT(*) FILTER (WHERE final_grade_value IN ('2', 'Незачет')) as failed_grades
-FROM app.final_grades
-WHERE app.check_segment_access(segment_id)
-GROUP BY subject_id, semester;
+    COUNT(*) FILTER (WHERE fg.final_grade_value IN ('5', 'Зачет')) as excellent_grades,
+    COUNT(*) FILTER (WHERE fg.final_grade_value IN ('4', '3')) as good_satisfactory_grades,
+    COUNT(*) FILTER (WHERE fg.final_grade_value IN ('2', 'Незачет')) as failed_grades
+FROM app.final_grades fg
+JOIN ref.subjects sub ON fg.subject_id = sub.subject_id
+JOIN ref.segments seg ON fg.segment_id = seg.segment_id
+WHERE app.check_segment_access(fg.segment_id)
+GROUP BY sub.subject_id, sub.subject_name, fg.semester, seg.segment_name;
 
--- 3. Статистика документов студентов - защита от утечки информации о конкретных документах
+-- 3. Статистика документов студентов С УЧЕТОМ СЕГМЕНТОВ
 CREATE VIEW app.document_stats WITH (security_barrier) AS
 SELECT 
-    document_type,
+    sd.document_type,
+    seg.segment_name,
     COUNT(*) as total_documents,
-    COUNT(DISTINCT student_id) as students_with_documents,
-    COUNT(*) FILTER (WHERE document_series IS NOT NULL) as documents_with_series
-FROM app.student_documents
-WHERE app.check_segment_access(segment_id)
-GROUP BY document_type;
+    COUNT(DISTINCT sd.student_id) as students_with_documents,
+    -- Безопасная статистика без раскрытия номеров документов
+    COUNT(*) FILTER (WHERE sd.document_series IS NOT NULL) as documents_with_series,
+    COUNT(*) FILTER (WHERE sd.issue_date > '2020-01-01') as recent_documents
+FROM app.student_documents sd
+JOIN ref.segments seg ON sd.segment_id = seg.segment_id
+WHERE app.check_segment_access(sd.segment_id)
+GROUP BY sd.document_type, seg.segment_name;
 
 -- Даем права только на чтение
 GRANT SELECT ON 
@@ -1646,8 +1665,7 @@ CREATE POLICY auditor_bypass_rls ON app.role_segments
     FOR SELECT TO auditor USING (true);
 
 CREATE OR REPLACE FUNCTION app.set_session_ctx(
-    p_segment_id INTEGER,
-    p_actor_id INTEGER
+    p_segment_id INTEGER
 ) RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
