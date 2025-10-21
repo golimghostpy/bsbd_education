@@ -1,6 +1,8 @@
 --revoke
 REVOKE ALL ON DATABASE education_db FROM PUBLIC;
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE ROLE test_connect WITH LOGIN;
 
 --schemas
@@ -286,6 +288,18 @@ CREATE TABLE audit.function_calls (
     caller_role VARCHAR(100) NOT NULL,
     input_params JSONB,
     success BOOLEAN NOT NULL
+);
+
+-- Таблица для логирования изменений строк
+CREATE TABLE audit.row_change_log (
+    log_id BIGSERIAL PRIMARY KEY,
+    change_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    table_name VARCHAR(100) NOT NULL,
+    operation CHAR(1) NOT NULL CHECK (operation IN ('U', 'D')), -- U=UPDATE, D=DELETE
+    user_name VARCHAR(100) NOT NULL,
+    old_data JSONB,
+    new_data JSONB,
+    client_ip INET
 );
 
 -- Добавление внешних ключей, которые ссылаются на таблицу teachers
@@ -1726,7 +1740,7 @@ EXCEPTION
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER, INTEGER) TO app_reader, app_writer, app_owner, dml_admin;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER) TO app_reader, app_writer, app_owner, dml_admin;
 
 -- Функция для получения текущего контекста
 CREATE OR REPLACE FUNCTION app.get_session_ctx()
@@ -1821,3 +1835,145 @@ GRANT app_reader TO nstu_reader;
 GRANT app_writer TO nstu_writer;
 GRANT app_owner TO nstu_owner;
 
+-- UPDATE/DELETE audit
+
+CREATE OR REPLACE FUNCTION audit.mask_sensitive_data(data JSONB, table_name TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    masked_data JSONB := data;
+BEGIN
+    -- Для разных таблиц применяем разные правила маскировки
+    IF table_name = 'students' THEN
+        -- Маскируем email (оставляем только домен)
+        IF masked_data ? 'email' AND masked_data->>'email' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{email}', 
+                to_jsonb('***@' || substring(masked_data->>'email' from '@(.+)$')));
+        END IF;
+        
+        -- Маскируем телефон (оставляем последние 4 цифры)
+        IF masked_data ? 'phone_number' AND masked_data->>'phone_number' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{phone_number}', 
+                to_jsonb('***-' || right(masked_data->>'phone_number', 4)));
+        END IF;
+        
+        -- хэшируем номер студенческого билета с помощью pgcrypto (необратимо)
+        IF masked_data ? 'student_card_number' AND masked_data->>'student_card_number' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{student_card_number}', 
+                to_jsonb(encode(digest(masked_data->>'student_card_number', 'sha256'), 'hex')));
+        END IF;
+    END IF;
+    
+    IF table_name = 'student_documents' THEN
+        -- хэшируем серию документа с помощью pgcrypto
+        IF masked_data ? 'document_series' AND masked_data->>'document_series' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{document_series}', 
+                to_jsonb(encode(digest(masked_data->>'document_series', 'sha256'), 'hex')));
+        END IF;
+        
+        -- хэшируем номер документа с помощью pgcrypto
+        IF masked_data ? 'document_number' AND masked_data->>'document_number' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{document_number}', 
+                to_jsonb(encode(digest(masked_data->>'document_number', 'sha256'), 'hex')));
+        END IF;
+        
+        -- Маскируем issuing_authority (оставляем первые 10 символов)
+        IF masked_data ? 'issuing_authority' AND masked_data->>'issuing_authority' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{issuing_authority}', 
+                to_jsonb(left(masked_data->>'issuing_authority', 10) || '...'));
+        END IF;
+    END IF;
+    
+    IF table_name = 'teachers' THEN
+        -- Маскируем email преподавателей
+        IF masked_data ? 'email' AND masked_data->>'email' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{email}', 
+                to_jsonb('***@' || substring(masked_data->>'email' from '@(.+)$')));
+        END IF;
+        
+        -- Маскируем телефон преподавателей
+        IF masked_data ? 'phone_number' AND masked_data->>'phone_number' IS NOT NULL THEN
+            masked_data = jsonb_set(masked_data, '{phone_number}', 
+                to_jsonb('***-' || right(masked_data->>'phone_number', 4)));
+        END IF;
+    END IF;
+    
+    RETURN masked_data;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION audit.log_row_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    old_json JSONB;
+    new_json JSONB;
+BEGIN
+    -- Определяем операцию и подготавливаем данные
+    IF TG_OP = 'UPDATE' THEN
+        old_json = to_jsonb(OLD);
+        new_json = to_jsonb(NEW);
+        
+        -- Применяем маскировку к чувствительным данным
+        old_json = audit.mask_sensitive_data(old_json, TG_TABLE_NAME);
+        new_json = audit.mask_sensitive_data(new_json, TG_TABLE_NAME);
+        
+        INSERT INTO audit.row_change_log (
+            table_name, operation, user_name, 
+            old_data, new_data, client_ip
+        ) VALUES (
+            TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME,
+            'U',
+            session_user,
+            old_json,
+            new_json,
+            inet_client_addr()
+        );
+        
+    ELSIF TG_OP = 'DELETE' THEN
+        old_json = to_jsonb(OLD);
+        
+        -- Применяем маскировку к удаляемым данным
+        old_json = audit.mask_sensitive_data(old_json, TG_TABLE_NAME);
+        
+        INSERT INTO audit.row_change_log (
+            table_name, operation, user_name, 
+            old_data, new_data, client_ip
+        ) VALUES (
+            TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME,
+            'D',
+            session_user,
+            old_json,
+            NULL,
+            inet_client_addr()
+        );
+    END IF;
+    
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+-- 1. Триггер для таблицы students
+CREATE TRIGGER tr_students_audit
+    AFTER UPDATE OR DELETE ON app.students
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.log_row_change();
+
+
+-- 2. Триггер для таблицы student_documents
+CREATE TRIGGER tr_student_documents_audit
+    AFTER UPDATE OR DELETE ON app.student_documents
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.log_row_change();
+
+-- 3. Триггер для таблицы teachers
+CREATE TRIGGER tr_teachers_audit
+    AFTER UPDATE OR DELETE ON app.teachers
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.log_row_change();
+
+GRANT SELECT ON audit.row_change_log TO auditor, security_admin;
