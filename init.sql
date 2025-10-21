@@ -267,7 +267,7 @@ CREATE TABLE app.student_documents (
     document_number VARCHAR(50) NOT NULL,
     issue_date DATE,
     issuing_authority TEXT,
-    FOREIGN KEY (student_id) REFERENCES app.students(student_id)
+    FOREIGN KEY (student_id) REFERENCES app.students(student_id) ON DELETE CASCADE
 );
 
 -- 3 Схема audit (Audit - аудит и логирование)

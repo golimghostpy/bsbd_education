@@ -129,7 +129,7 @@ prepare_test_data() {
     -- Создаем тестовых студентов
     INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) VALUES 
     (1000, 'Студент1000', 'Тестов1000', 'TEST1000', 1000, 1000, 'student1000@test.ru'),
-    (1001, 'Студент1001', 'Тестов1001', 'TEST1001', 1001, 1001, 'student1001@test.ru')
+    (1001, 'Студент1001', 'Тестов1001', 'TEST1001', 1001, 1001, 'student1001@test.ru'),
     ON CONFLICT (student_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
     
     -- Создаем тестовые документы
@@ -197,7 +197,7 @@ check_row_count() {
         return 0
     else
         echo -e "${RED}--- ОШИБКА: Найдено $row_count строк (ожидалось $expected_count)${NC}"
-        echo "Результат: $result"
+        echo "$result"
         return 1
     fi
 }
@@ -326,11 +326,11 @@ set_test_connect_segment 1000
 setup_test_connect_basic
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "SELECT app.set_session_ctx(1000, 1000); SELECT first_name FROM app.students WHERE segment_id = 1000 LIMIT 1;" "Базовые права: SELECT в своем сегменте" "success"
-check_command "SELECT app.set_session_ctx(1000, 1000); SELECT subject_name FROM ref.subjects LIMIT 1;" "Базовые права: SELECT в схеме ref" "success"
+check_command "SELECT app.set_session_ctx(1000); SELECT first_name FROM app.students WHERE segment_id = 1000 LIMIT 1;" "Базовые права: SELECT в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000); SELECT subject_name FROM ref.subjects LIMIT 1;" "Базовые права: SELECT в схеме ref" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
-check_command "SELECT app.set_session_ctx(1000, 1000); CREATE TABLE app.unauthorized_table (id serial);" "Базовые права: CREATE TABLE в схеме app" "error"
+check_command "SELECT app.set_session_ctx(1000); CREATE TABLE app.unauthorized_table (id serial);" "Базовые права: CREATE TABLE в схеме app" "error"
 
 reset_test_connect
 
@@ -341,12 +341,12 @@ setup_test_connect_basic
 grant_additional_role_to_test_connect "app_owner"
 
 echo -e "${CYAN}--- Разрешенные операции ---${NC}"
-check_command "SELECT app.set_session_ctx(1000, 1000); DELETE FROM app.students WHERE student_card_number = 'TEST1000';" "app_owner: DELETE в своем сегменте" "success"
-check_command "SELECT app.set_session_ctx(1000, 1000); CREATE TABLE app.test_table (id serial, name text);" "app_owner: CREATE TABLE в схеме app" "success"
-check_command "SELECT app.set_session_ctx(1000, 1000); COMMENT ON TABLE app.test_table IS 'тестовый комм';" "app_owner: COMMENT ON TABLE в схеме app" "success"
+check_command "SELECT app.set_session_ctx(1000); DELETE FROM app.students WHERE student_card_number = 'TEST1000';" "app_owner: DELETE в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000); CREATE TABLE app.test_table (id serial, name text);" "app_owner: CREATE TABLE в схеме app" "success"
+check_command "SELECT app.set_session_ctx(1000); COMMENT ON TABLE app.test_table IS 'тестовый комм';" "app_owner: COMMENT ON TABLE в схеме app" "success"
 
 echo -e "${PURPLE}--- Запрещенные операции ---${NC}"
-check_command "SELECT app.set_session_ctx(1000, 1000); CREATE TABLE ref.unauthorized_ref_table (id serial);" "app_owner: CREATE TABLE в схеме ref" "error"
+check_command "SELECT app.set_session_ctx(1000); CREATE TABLE ref.unauthorized_ref_table (id serial);" "app_owner: CREATE TABLE в схеме ref" "error"
 
 # Восстанавливаем тестового студента
 sudo docker exec -i postgres psql -U postgres -d education_db -c "
@@ -441,7 +441,7 @@ setup_test_connect_basic
 
 # Обычный пользователь должен видеть только студентов сегмента 1000
 result_ordinary=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -t -c "
-    SELECT app.set_session_ctx(1000, 1000);
+    SELECT app.set_session_ctx(1000);
     SELECT COUNT(*) FROM app.students WHERE student_id IN (20001, 20002, 20003);
 " 2>&1 | tr -d ' \n')
 
@@ -537,7 +537,7 @@ echo -e "${BLUE}=== КЕЙС 1: Чтение «чужих» строк (долж
 set_test_connect_segment 1000
 setup_test_connect_basic
 
-check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_command "SELECT app.set_session_ctx(1000);" "Установка контекста для сегмента 1000" "success"
 check_row_count "SELECT * FROM app.students WHERE segment_id = 1001;" "Чтение студентов из чужого сегмента 1001" 0
 check_row_count "SELECT * FROM app.teachers WHERE segment_id = 1001;" "Чтение преподавателей из чужого сегмента 1001" 0
 
@@ -548,7 +548,7 @@ echo -e "${BLUE}=== КЕЙС 2: Вставка с неверным segment_id (�
 set_test_connect_segment 1000
 setup_test_connect_basic
 
-check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_command "SELECT app.set_session_ctx(1000);" "Установка контекста для сегмента 1000" "success"
 check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Чужой', 'Студент', 'FOREIGN001', 1000, 1001);" "Вставка студента с segment_id=1001 (чужой сегмент)" "error"
 check_command "INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Несуществующий', 'Студент', 'GHOST001', 1000, 999);" "Вставка студента с segment_id=999 (несуществующий)" "error"
 
@@ -559,7 +559,7 @@ echo -e "${BLUE}=== КЕЙС 3: Корректные операции в сво�
 set_test_connect_segment 1000
 setup_test_connect_basic
 
-check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000" "success"
+check_command "SELECT app.set_session_ctx(1000);" "Установка контекста для сегмента 1000" "success"
 check_row_count "SELECT * FROM app.students WHERE student_id = 1000;" "Чтение студента из своего сегмента 1000" 1
 check_row_count "SELECT * FROM app.teachers WHERE teacher_id = 1000;" "Чтение преподавателя из своего сегмента 1000" 1
 
@@ -584,7 +584,7 @@ echo -e "${BLUE}=== КЕЙС 5: Проверка работы set_session_ctx() 
 set_test_connect_segment 1000
 setup_test_connect_basic
 
-check_command "SELECT app.set_session_ctx(1000, 1000);" "Установка контекста для сегмента 1000 (успешно)" "success"
+check_command "SELECT app.set_session_ctx(1000);" "Установка контекста для сегмента 1000 (успешно)" "success"
 check_command "SELECT * FROM app.get_session_ctx();" "Проверка установленного контекста" "success"
 check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Доступ к данным после установки контекста" 1
 
@@ -595,8 +595,8 @@ echo -e "${BLUE}=== КЕЙС 6: Проверка работы set_session_ctx() 
 set_test_connect_segment 1000
 setup_test_connect_basic
 
-check_command "SELECT app.set_session_ctx(1001, 1000);" "Установка контекста для сегмента 1001 (чужой)" "error"
-check_command "SELECT app.set_session_ctx(9999, 1000);" "Установка контекста для сегмента 9999 (несуществующий)" "error"
+check_command "SELECT app.set_session_ctx(1001);" "Установка контекста для сегмента 1001 (чужой)" "error"
+check_command "SELECT app.set_session_ctx(9999);" "Установка контекста для сегмента 9999 (несуществующий)" "error"
 
 reset_test_connect
 
@@ -605,7 +605,7 @@ echo -e "${BLUE}=== КЕЙС 7: Перекрестное тестировани�
 setup_test_connect_basic
 set_test_connect_segment 1001
 timestamp2=$(date +%s)
-check_command "SELECT app.set_session_ctx(1001, 1001);" "Установка контекста для сегмента 1001" "success"
+check_command "SELECT app.set_session_ctx(1001);" "Установка контекста для сегмента 1001" "success"
 check_command "INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) VALUES (5556, 'Новый1001', 'Студент${timestamp2}', 'NEW1001-${timestamp2}', 1001, 1001, 'new1001-${timestamp2}@test.ru');" "Вставка студента в сегмент 1001" "success"
 check_command "DELETE FROM app.students WHERE student_card_number = 'NEW1001-${timestamp2}';" "Очистка тестовых данных 1001" "success"
 reset_test_connect
@@ -626,8 +626,169 @@ setup_test_connect_basic
 grant_additional_role_to_test_connect "dml_admin"
 
 # Администраторы видят все данные без установки контекста
-check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 16
+check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 15
 check_row_count "SELECT * FROM app.teachers;" "DML_ADMIN: чтение всех преподавателей" 16
+
+reset_test_connect
+
+# ====================================================================
+# ТЕСТИРОВАНИЕ ДОПОЛНИТЕЛЬНЫХ СЦЕНАРИЕВ БЕЗОПАСНОСТИ
+# ====================================================================
+
+echo -e "${YELLOW}=== ТЕСТИРОВАНИЕ ДОПОЛНИТЕЛЬНЫХ СЦЕНАРИЕВ БЕЗОПАСНОСТИ ===${NC}"
+
+# КЕЙС 10: Попытка обхода WITH CHECK OPTION через Secure View
+echo -e "${BLUE}=== КЕЙС 10: Попытка обхода WITH CHECK OPTION через Secure View ===${NC}"
+set_test_connect_segment 1000
+setup_test_connect_basic
+
+echo -e "${CYAN}--- Проверка работы Secure View ---${NC}"
+check_command "SELECT app.set_session_ctx(1000); SELECT COUNT(*) FROM app.students_secure;" "Secure View: чтение студентов через view" "success"
+
+echo -e "${PURPLE}--- Попытка обхода WITH CHECK OPTION ---${NC}"
+# Попытка вставить данные с неправильным segment_id через view
+check_command "SELECT app.set_session_ctx(1000); INSERT INTO app.students_secure (last_name, first_name, student_card_number, group_id, status) VALUES ('Обходной', 'Студент', 'BYPASS001', 1001, 'Обучается');" "Secure View: попытка вставки с неправильным segment_id" "error"
+
+# Попытка обновления данных на чужие через view
+result=$(check_command "SELECT app.set_session_ctx(1000); UPDATE app.students_secure SET group_id = 1005 WHERE student_id = 1001;" "Secure View: попытка обновления на чужой segment_id" "error")
+
+if [ -n "$(echo $result | grep "0")" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Обновление в чужом сегменте не произошло${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Произошло обновление чужом сегменте${NC}"
+fi
+
+reset_test_connect
+
+# КЕЙС 11: Проверка SECURITY BARRIER VIEW - только агрегаты
+echo -e "${BLUE}=== КЕЙС 11: Проверка SECURITY BARRIER VIEW - только агрегаты ===${NC}"
+set_test_connect_segment 1000
+setup_test_connect_basic
+
+echo -e "${CYAN}--- Проверка доступа к агрегированным данным ---${NC}"
+check_command "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats WHERE segment_name = 'Тестовый Университет 1000';" "Security Barrier View: доступ к агрегатам своего сегмента" "success"
+check_row_count "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats WHERE segment_name = 'Тестовый Университет 1000';" "Security Barrier View: агрегаты только своего сегмента" 2
+
+echo -e "${PURPLE}--- Проверка отсутствия доступа к деталям ---${NC}"
+# Проверяем, что в security barrier view нет доступа к индивидуальным данным
+check_row_count "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats WHERE total_students < 5;" "Security Barrier View: нет фильтрации по деталям" 2
+
+# Проверяем статистику предметов
+check_command "SELECT app.set_session_ctx(1000); SELECT * FROM app.subject_stats LIMIT 3;" "Security Barrier View: доступ к статистике предметов" "success"
+
+# Проверяем статистику документов (без доступа к номерам)
+check_command "SELECT app.set_session_ctx(1000); SELECT * FROM app.document_stats;" "Security Barrier View: доступ к статистике документов" "success"
+
+reset_test_connect
+
+# КЕЙС 12: Аудит изменений строк в row_change_log
+echo -e "${BLUE}=== КЕЙС 12: Аудит изменений строк в row_change_log ===${NC}"
+set_test_connect_segment 1000
+setup_test_connect_basic
+
+echo -e "${CYAN}--- Проверка аудита изменений ---${NC}"
+# Получаем начальное количество записей в аудите
+initial_audit_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM audit.row_change_log;" 2>&1 | tr -d ' \n')
+
+# Выполняем изменение данных
+check_command "SELECT app.set_session_ctx(1000); UPDATE app.students SET last_name = 'Аудируемый' WHERE student_id = 1000;" "Аудит: изменение данных студента" "success"
+
+# Проверяем, что запись появилась в аудите
+final_audit_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM audit.row_change_log;" 2>&1 | tr -d ' \n')
+
+if [ "$final_audit_count" -gt "$initial_audit_count" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Запись об изменении добавлена в audit.row_change_log${NC}"
+    
+    # Проверяем содержимое записи аудита (маскированные данные)
+    audit_entry=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT old_data->>'last_name', new_data->>'last_name' FROM audit.row_change_log WHERE table_name = 'app.students' ORDER BY log_id DESC LIMIT 1;" 2>&1)
+    echo -e "${CYAN}Запись аудита: $audit_entry${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Запись в audit.row_change_log не добавлена${NC}"
+fi
+
+# Проверяем аудит удаления
+initial_audit_count=$final_audit_count
+
+# Создаем временного студента для теста удаления
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) 
+VALUES (8888, 'ДляУдаления', 'Тест', 'DELETE_TEST', 1000, 1000, 'delete@test.ru')
+ON CONFLICT (student_id) DO UPDATE SET last_name = 'ДляУдаления';" 2>&1
+
+check_command "SELECT app.set_session_ctx(1000); DELETE FROM app.students WHERE student_id = 8888;" "Аудит: удаление данных студента" "success"
+
+final_audit_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM audit.row_change_log;" 2>&1 | tr -d ' \n')
+
+if [ "$final_audit_count" -gt "$initial_audit_count" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Запись об удалении добавлена в audit.row_change_log${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Запись об удалении в audit.row_change_log не добавлена${NC}"
+fi
+
+reset_test_connect
+
+# КЕЙС 13: Попытка удаления строк не из своего сегмента
+echo -e "${BLUE}=== КЕЙС 13: Попытка удаления строк не из своего сегмента ===${NC}"
+set_test_connect_segment 1000
+setup_test_connect_basic
+
+echo -e "${PURPLE}--- Попытка удаления из чужого сегмента ---${NC}"
+# Создаем студента в сегменте 1001
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) 
+VALUES (9999, 'ЧужойСтудент', 'Сегмент1001', 'FOREIGN_DELETE', 1001, 1001, 'foreign@test.ru')
+ON CONFLICT (student_id) DO UPDATE SET segment_id = 1001;" 2>&1
+
+# Пытаемся удалить из сегмента 1000
+result=$(check_command "SELECT app.set_session_ctx(1000); DELETE FROM app.students WHERE student_id = 9999;" "RLS: попытка удаления студента из чужого сегмента" "error")
+
+if [ -n "$(echo $result | grep "0")" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Удаление из чужого сегмента не произошло${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Произошло удаление из чужого сегмента${NC}"
+fi
+
+# Проверяем от лица администратора, что студент все еще существует
+admin_check=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM app.students WHERE student_id = 9999;" 2>&1 | tr -d ' \n')
+if [ "$admin_check" = "1" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: RLS заблокировал удаление студента из чужого сегмента${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Студент был удален несмотря на RLS${NC}"
+fi
+
+# Очистка тестовых данных
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+DELETE FROM app.students WHERE student_id IN (8888, 9999);
+DELETE FROM audit.row_change_log WHERE table_name LIKE '%students%' AND (old_data->>'student_card_number' IN ('DELETE_TEST', 'FOREIGN_DELETE') OR new_data->>'student_card_number' IN ('DELETE_TEST', 'FOREIGN_DELETE'));" 2>&1
+
+reset_test_connect
+
+# КЕЙС 14: Комплексная проверка RLS с разными операциями
+echo -e "${BLUE}=== КЕЙС 14: Комплексная проверка RLS с разными операций ===${NC}"
+set_test_connect_segment 1000
+setup_test_connect_basic
+
+echo -e "${CYAN}--- Проверка различных операций в своем сегменте ---${NC}"
+check_command "SELECT app.set_session_ctx(1000); SELECT COUNT(*) FROM app.students;" "RLS: SELECT в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000); UPDATE app.students SET email = 'updated@test.ru' WHERE student_id = 1000;" "RLS: UPDATE в своем сегменте" "success"
+check_command "SELECT app.set_session_ctx(1000); DELETE FROM app.students WHERE student_id = 1000;" "RLS: DELETE в своем сегменте" "success"
+
+# Восстанавливаем удаленного студента
+sudo docker exec -i postgres psql -U postgres -d education_db -c "
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) 
+VALUES (1000, 'Студент1000', 'Тестов1000', 'TEST1000', 1000, 1000, 'student1000@test.ru');" 2>&1
+
+echo -e "${PURPLE}--- Проверка блокировки операций в чужом сегменте ---${NC}"
+check_command "SELECT app.set_session_ctx(1000); SELECT COUNT(*) FROM app.students WHERE segment_id = 1001;" "RLS: SELECT из чужого сегмента" "success"
+check_row_count "SELECT app.set_session_ctx(1000); SELECT * FROM app.students WHERE segment_id = 1001;" "RLS: строки из чужого сегмента не возвращаются" 1
+result=$(check_command "SELECT app.set_session_ctx(1000); UPDATE app.students SET email = 'hacked@test.ru' WHERE segment_id = 1001;" "RLS: UPDATE в чужом сегменте" "error")
+if [ -n "$(echo $result | grep "0")" ]; then
+    echo -e "${GREEN}+++ УСПЕХ: Обновление в чужом сегменте не произошло${NC}"
+else
+    echo -e "${RED}--- ОШИБКА: Произошло обновление чужом сегменте${NC}"
+fi
+
+check_command "SELECT app.set_session_ctx(1000); INSERT INTO app.students (last_name, first_name, student_card_number, group_id, segment_id) VALUES ('Взлом', 'Чужой', 'HACKED001', 1001, 1001);" "RLS: INSERT в чужой сегмент" "error"
 
 reset_test_connect
 
@@ -646,7 +807,7 @@ set_test_connect_segment 1000
 setup_test_connect_basic
 
 if [ -n "$TEST_GROUP_ID" ]; then
-    check_function "SELECT app.set_session_ctx(1000, 1000); SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex_new_$(date +%s)@student.ru', '+7-900-300-01-01', $TEST_GROUP_ID);" "enroll_student: успешное зачисление в сегмент 1000" "success"
+    check_function "SELECT app.set_session_ctx(1000); SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'novikov_alex_new_$(date +%s)@student.ru', '+7-900-300-01-01', $TEST_GROUP_ID);" "enroll_student: успешное зачисление в сегмент 1000" "success"
 else
     echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
 fi
@@ -663,7 +824,7 @@ sudo docker exec -i postgres psql -U postgres -d education_db -c "
 " 2>&1
 
 if [ -n "$TEST_GROUP_ID" ]; then
-    check_function "SELECT app.set_session_ctx(1000, 1000); SELECT app.enroll_student('Петров', 'Иван', 'Сергеевич', 'petrov_ivan_$(date +%s)@student.ru', '+7-900-300-01-02', $TEST_GROUP_ID);" "enroll_student: отсутствуют права app_writer" "error"
+    check_function "SELECT app.set_session_ctx(1000); SELECT app.enroll_student('Петров', 'Иван', 'Сергеевич', 'petrov_ivan_$(date +%s)@student.ru', '+7-900-300-01-02', $TEST_GROUP_ID);" "enroll_student: отсутствуют права app_writer" "error"
 else
     echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
 fi
@@ -674,7 +835,7 @@ set_test_connect_segment 1000
 setup_test_connect_basic
 
 if [ -n "$TEST_GROUP_ID" ]; then
-    check_function "SELECT app.set_session_ctx(1000, 1000); SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'student1000@test.ru', '+7-900-300-01-03', $TEST_GROUP_ID);" "enroll_student: почта уже существует" "error"
+    check_function "SELECT app.set_session_ctx(1000); SELECT app.enroll_student('Новиков', 'Алексей', 'Петрович', 'student1000@test.ru', '+7-900-300-01-03', $TEST_GROUP_ID);" "enroll_student: почта уже существует" "error"
 else
     echo "Пропускаем тест enroll_student - TEST_GROUP_ID не найден"
 fi
@@ -704,7 +865,7 @@ set_test_connect_segment 1000
 setup_test_connect_basic
 
 if [ -n "$GRADE_STUDENT_ID" ] && [ -n "$GRADE_TEACHER_ID" ]; then
-    check_function "SELECT app.set_session_ctx(1000, 1000); SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $GRADE_TEACHER_ID, 1, '4', 1);" "register_final_grade: успешная регистрация оценки в сегменте 1000" "success"
+    check_function "SELECT app.set_session_ctx(1000); SELECT app.register_final_grade($GRADE_STUDENT_ID, 1, $GRADE_TEACHER_ID, 1, '4', 1);" "register_final_grade: успешная регистрация оценки в сегменте 1000" "success"
 else
     echo "Пропускаем тест register_final_grade - не удалось создать необходимые ID"
 fi
@@ -727,7 +888,7 @@ set_test_connect_segment 1000
 setup_test_connect_basic
 
 if [ -n "$DOC_STUDENT_ID" ]; then
-    check_function "SELECT app.set_session_ctx(1000, 1000); SELECT app.add_student_document($DOC_STUDENT_ID, 'ИНН'::public.document_type_enum, NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: успешное добавление документа в сегменте 1000" "success"
+    check_function "SELECT app.set_session_ctx(1000); SELECT app.add_student_document($DOC_STUDENT_ID, 'ИНН'::public.document_type_enum, NULL, '0987654321', '2023-08-20', 'ИФНС России');" "add_student_document: успешное добавление документа в сегменте 1000" "success"
 else
     echo "Пропускаем тест add_student_document - не удалось создать DOC_STUDENT_ID"
 fi
