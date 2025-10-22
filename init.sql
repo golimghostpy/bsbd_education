@@ -280,7 +280,7 @@ CREATE TABLE audit.login_log (
     client_ip INET NOT NULL -- Тип INET для хранения IPv4 и IPv6 адресов
 );
 
---3.2 Лог вызова функций
+-- 3.2 Лог вызова функций
 CREATE TABLE audit.function_calls (
     call_id SERIAL PRIMARY KEY,
     call_time TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -290,8 +290,20 @@ CREATE TABLE audit.function_calls (
     success BOOLEAN NOT NULL
 );
 
--- Таблица для логирования изменений строк
+-- 3.3 Таблица для логирования изменений строк
 CREATE TABLE audit.row_change_log (
+    log_id BIGSERIAL PRIMARY KEY,
+    change_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    table_name VARCHAR(100) NOT NULL,
+    operation CHAR(1) NOT NULL CHECK (operation IN ('U', 'D')), -- U=UPDATE, D=DELETE
+    user_name VARCHAR(100) NOT NULL,
+    old_data JSONB,
+    new_data JSONB,
+    client_ip INET
+);
+
+-- 3.4 Таблица для бэкапа логов из row_change_log
+CREATE TABLE audit.row_change_log_archive (
     log_id BIGSERIAL PRIMARY KEY,
     change_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     table_name VARCHAR(100) NOT NULL,
@@ -1977,3 +1989,98 @@ CREATE TRIGGER tr_teachers_audit
     EXECUTE FUNCTION audit.log_row_change();
 
 GRANT SELECT ON audit.row_change_log TO auditor, security_admin;
+
+
+-- BACKUP LOGS FROM ROW_CHECK_LOGS
+CREATE OR REPLACE FUNCTION audit.backup_audit_logs(days_interval INT)
+RETURNS TABLE(
+    archived_count BIGINT,
+    deleted_count BIGINT,
+    backup_timestamp TIMESTAMP
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'audit'
+AS $$
+DECLARE
+    v_cutoff_date TIMESTAMP;
+    v_archived BIGINT := 0;
+    v_deleted BIGINT := 0;
+BEGIN
+    -- Вычисляем дату отсечения
+    v_cutoff_date := NOW() - (days_interval || ' days')::INTERVAL;
+    
+    -- Переносим старые записи в архив
+    WITH moved_rows AS (
+        DELETE FROM audit.row_change_log 
+        WHERE change_time < v_cutoff_date
+        RETURNING *
+    )
+    INSERT INTO audit.row_change_log_archive 
+    SELECT * FROM moved_rows;
+    
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    
+    -- Логируем выполнение операции
+    INSERT INTO audit.function_calls (
+        function_name, 
+        caller_role, 
+        input_params, 
+        success
+    ) VALUES (
+        'backup_audit_logs',
+        session_user,
+        jsonb_build_object(
+            'days_interval', days_interval,
+            'cutoff_date', v_cutoff_date,
+            'archived_records', v_deleted
+        ),
+        true
+    );
+    
+    -- Возвращаем статистику используя NOW()
+    RETURN QUERY SELECT 
+        v_deleted as archived_count,
+        v_deleted as deleted_count, 
+        NOW()::TIMESTAMP as backup_timestamp;
+        
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (
+            function_name, 
+            caller_role, 
+            input_params, 
+            success
+        ) VALUES (
+            'backup_audit_logs',
+            session_user,
+            jsonb_build_object(
+                'days_interval', days_interval,
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION audit.backup_audit_logs TO security_admin, auditor;
+
+-- исуственное создание старых логов
+INSERT INTO audit.row_change_log (change_time, table_name, operation, user_name, old_data, new_data, client_ip)
+VALUES 
+    (CURRENT_TIMESTAMP - INTERVAL '5 days', 'app.student_documents', 'U', 'new_user', 
+     '{"document_type": "Аттестат", "issue_date": "2025-06-25"}'::jsonb,
+     '{"document_type": "Аттестат", "issue_date": "2025-06-26"}'::jsonb,
+     '192.168.1.105'::inet),
+
+    (CURRENT_TIMESTAMP - INTERVAL '40 days', 'app.student_documents', 'U', 'registry_user', 
+     '{"document_type": "Аттестат", "issue_date": "2025-06-25"}'::jsonb,
+     '{"document_type": "Аттестат", "issue_date": "2025-06-26"}'::jsonb,
+     '192.168.1.106'::inet),
+    
+    (CURRENT_TIMESTAMP - INTERVAL '38 days', 'app.teachers', 'D', 'hr_admin', 
+     '{"last_name": "Кузнецов", "first_name": "Сергей", "academic_degree": "Кандидат наук"}'::jsonb,
+     NULL,
+     '192.168.1.107'::inet);
