@@ -9,6 +9,22 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Флаг для тестирования производительности
+PERFORMANCE_TEST=false
+
+# Обработка аргументов командной строки
+while getopts "e" opt; do
+    case $opt in
+        e)
+            PERFORMANCE_TEST=true
+            ;;
+        \?)
+            echo "Использование: $0 [-e]"
+            exit 1
+            ;;
+    esac
+done
+
 # Функция для сброса прав test_connect
 reset_test_connect() {
     echo "Сброс прав для test_connect..."
@@ -29,7 +45,7 @@ reset_test_connect() {
         
         -- Очищаем привязку к сегментам
         DELETE FROM app.role_segments WHERE role_name = 'test_connect';
-    " 2>&1 | grep -v "WARNING"  # Игнорируем предупреждения
+    " > /dev/null 2>&1
 }
 
 # Функция для базовой настройки test_connect
@@ -40,7 +56,7 @@ setup_test_connect_basic() {
         GRANT USAGE ON SCHEMA app TO test_connect;
         GRANT app_reader TO test_connect;
         GRANT app_writer TO test_connect;
-    " 2>&1
+    " > /dev/null 2>&1
 }
 
 # Функция для настройки сегмента test_connect
@@ -50,7 +66,7 @@ set_test_connect_segment() {
     sudo docker exec -i postgres psql -U postgres -d education_db -c "
         DELETE FROM app.role_segments WHERE role_name = 'test_connect';
         INSERT INTO app.role_segments (role_name, segment_id) VALUES ('test_connect', $segment_id);
-    " 2>&1
+    " > /dev/null 2>&1
 }
 
 # Функция для выдачи дополнительной роли test_connect
@@ -59,7 +75,7 @@ grant_additional_role_to_test_connect() {
     echo "Выдача дополнительной роли $role test_connect..."
     sudo docker exec -i postgres psql -U postgres -d education_db -c "
         GRANT $role TO test_connect;
-    " 2>&1
+    " > /dev/null 2>&1
 }
 
 # Функция для создания тестовых сегментов
@@ -291,6 +307,248 @@ cleanup_test_data() {
     DROP TABLE IF EXISTS audit.unauthorized_audit_table;
 EOF
 }
+
+run_explain_analyze() {
+    local query=$1
+    local test_name=$2
+    local connection_user=${3:-"postgres"}
+    
+    echo -e "${CYAN}--- $test_name ---${NC}"
+    
+    if [ "$connection_user" = "test_connect" ]; then
+        sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1000);
+        EXPLAIN (ANALYZE, BUFFERS) $query" 2>&1
+    else
+        sudo docker exec -i postgres psql -U postgres -d education_db -c "
+        EXPLAIN (ANALYZE, BUFFERS) $query" 2>&1
+    fi
+}
+
+# Функция для извлечения метрик из EXPLAIN ANALYZE
+extract_metrics() {
+    local explain_output=$1
+    local metric_type=$2 # "time" или "buffers"
+    
+    if [ "$metric_type" = "time" ]; then
+        echo "$explain_output" | grep -o "Execution Time: [0-9]*\.[0-9]*" | head -1 | cut -d':' -f2 | tr -d ' '
+    elif [ "$metric_type" = "buffers" ]; then
+        echo "$explain_output" | grep -o "Buffers: shared hit=[0-9]*" | head -1 | cut -d'=' -f2 | tr -d ' '
+    fi
+}
+
+# Функция для управления индексами
+manage_indexes() {
+    local action=$1 # "drop" или "create"
+    
+    if [ "$action" = "drop" ]; then
+        echo "Удаление индексов для тестирования..."
+        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
+        DROP INDEX IF EXISTS idx_students_segment;
+        DROP INDEX IF EXISTS idx_students_segment_group;
+        DROP INDEX IF EXISTS idx_students_segment_status;
+        DROP INDEX IF EXISTS idx_final_grades_segment;
+        DROP INDEX IF EXISTS idx_grades_student_segment_semester;
+EOF
+    elif [ "$action" = "create" ]; then
+        echo "Восстановление индексов..."
+        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
+        CREATE INDEX IF NOT EXISTS idx_students_segment ON app.students(segment_id);
+        CREATE INDEX IF NOT EXISTS idx_students_segment_group ON app.students(segment_id, group_id);
+        CREATE INDEX IF NOT EXISTS idx_students_segment_status ON app.students(segment_id, status);
+        CREATE INDEX IF NOT EXISTS idx_final_grades_segment ON app.final_grades(segment_id);
+        CREATE INDEX IF NOT EXISTS idx_grades_student_segment_semester ON app.final_grades(segment_id, student_id, semester);
+EOF
+    fi
+}
+
+# Функция для управления RLS
+manage_rls() {
+    local action=$1 # "disable" или "enable"
+    
+    if [ "$action" = "disable" ]; then
+        echo "Отключение RLS для тестирования..."
+        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
+        ALTER TABLE app.students DISABLE ROW LEVEL SECURITY;
+        ALTER TABLE app.final_grades DISABLE ROW LEVEL SECURITY;
+        ALTER TABLE app.study_groups DISABLE ROW LEVEL SECURITY;
+EOF
+    elif [ "$action" = "enable" ]; then
+        echo "Включение RLS..."
+        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
+        ALTER TABLE app.students ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE app.final_grades ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE app.study_groups ENABLE ROW LEVEL SECURITY;
+EOF
+    fi
+}
+
+if [ "$PERFORMANCE_TEST" = true ]; then
+    echo -e "${YELLOW}=== ЗАПУСК ТЕСТИРОВАНИЯ ПРОИЗВОДИТЕЛЬНОСТИ RLS И ИНДЕКСОВ ===${NC}"
+    
+    # Подготовка расширенных тестовых данных для производительности
+    echo "Подготовка расширенных тестовых данных для анализа производительности..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, status, email)
+SELECT 
+    generate_series(10000, 11000) as student_id,
+    'Тестовый' || generate_series(10000, 11000) as last_name,
+    'Студент' || generate_series(10000, 11000) as first_name,
+    'PERF_TEST_' || generate_series(10000, 11000) as student_card_number,
+    CASE WHEN random() < 0.3 THEN 1000 ELSE 1001 END as group_id,
+    CASE WHEN random() < 0.5 THEN 1000 ELSE 1001 END as segment_id,
+    CASE 
+        WHEN random() < 0.7 THEN 'Обучается'::public.student_status_enum
+        WHEN random() < 0.9 THEN 'Академический отпуск'::public.student_status_enum 
+        ELSE 'Отчислен'::public.student_status_enum
+    END as status,
+    'perf_test' || generate_series(10000, 11000) || '@test.ru' as email
+ON CONFLICT (student_id) DO NOTHING;
+
+ANALYZE app.students;
+ANALYZE app.final_grades;
+EOF
+
+    # Настройка test_connect для тестов производительности
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+GRANT CONNECT ON DATABASE education_db TO test_connect;
+GRANT USAGE ON SCHEMA app TO test_connect;
+GRANT app_reader TO test_connect;
+GRANT app_writer TO test_connect;
+DELETE FROM app.role_segments WHERE role_name = 'test_connect';
+INSERT INTO app.role_segments (role_name, segment_id) VALUES ('test_connect', 1000);"
+
+    echo -e "${BLUE}=== ТЕСТ 1: Запрос студентов с фильтрацией по segment_id + status ===${NC}"
+
+    QUERY1="SELECT * FROM app.students WHERE segment_id = 1000 AND status = 'Обучается' LIMIT 100;"
+
+    # Подтест 1: Без RLS и без индексов
+    echo -e "${BLUE}--- ПОДТЕСТ 1.1: Без RLS и без индексов ---${NC}"
+    manage_rls "disable"
+    manage_indexes "drop"
+    result_test1_1=$(run_explain_analyze "$QUERY1" "Без RLS и без индексов" "postgres")
+    time_test1_1=$(extract_metrics "$result_test1_1" "time")
+    buffers_test1_1=$(extract_metrics "$result_test1_1" "buffers")
+
+    # Подтест 2: С RLS и без индексов  
+    echo -e "${BLUE}--- ПОДТЕСТ 1.2: С RLS и без индексов ---${NC}"
+    manage_rls "enable"
+    manage_indexes "drop"
+    result_test1_2=$(run_explain_analyze "$QUERY1" "С RLS и без индексов" "test_connect")
+    time_test1_2=$(extract_metrics "$result_test1_2" "time")
+    buffers_test1_2=$(extract_metrics "$result_test1_2" "buffers")
+
+    # Подтест 3: С RLS и с индексами
+    echo -e "${BLUE}--- ПОДТЕСТ 1.3: С RLS и с индексами ---${NC}"
+    manage_rls "enable"
+    manage_indexes "create"
+    result_test1_3=$(run_explain_analyze "$QUERY1" "С RLS и с индексами" "test_connect")
+    time_test1_3=$(extract_metrics "$result_test1_3" "time")
+    buffers_test1_3=$(extract_metrics "$result_test1_3" "buffers")
+
+    echo -e "${GREEN}Результаты ТЕСТА 1:${NC}"
+    echo -e "Без RLS и без индексов:    Время: ${time_test1_1}ms, Буферы: ${buffers_test1_1}"
+    echo -e "С RLS и без индексов:      Время: ${time_test1_2}ms, Буферы: ${buffers_test1_2}"
+    echo -e "С RLS и с индексами:       Время: ${time_test1_3}ms, Буферы: ${buffers_test1_3}"
+
+    echo -e "${BLUE}=== ТЕСТ 2: Запрос с JOIN ===${NC}"
+
+    QUERY2="SELECT s.student_id, s.last_name, s.first_name, sg.group_name 
+            FROM app.students s 
+            JOIN app.study_groups sg ON s.group_id = sg.group_id 
+            WHERE s.segment_id = 1000 
+            AND s.status = 'Обучается' 
+            AND s.group_id = 1000;"
+
+    # Подтест 1: Без RLS и без индексов
+    echo -e "${BLUE}--- ПОДТЕСТ 2.1: Без RLS и без индексов ---${NC}"
+    manage_rls "disable"
+    manage_indexes "drop"
+    result_test2_1=$(run_explain_analyze "$QUERY2" "Без RLS и без индексов" "postgres")
+    time_test2_1=$(extract_metrics "$result_test2_1" "time")
+    buffers_test2_1=$(extract_metrics "$result_test2_1" "buffers")
+
+    # Подтест 2: С RLS и без индексов
+    echo -e "${BLUE}--- ПОДТЕСТ 2.2: С RLS и без индексов ---${NC}"
+    manage_rls "enable"
+    manage_indexes "drop"
+    result_test2_2=$(run_explain_analyze "$QUERY2" "С RLS и без индексов" "test_connect")
+    time_test2_2=$(extract_metrics "$result_test2_2" "time")
+    buffers_test2_2=$(extract_metrics "$result_test2_2" "buffers")
+
+    # Подтест 3: С RLS и с индексами
+    echo -e "${BLUE}--- ПОДТЕСТ 2.3: С RLS и с индексами ---${NC}"
+    manage_rls "enable"
+    manage_indexes "create"
+    result_test2_3=$(run_explain_analyze "$QUERY2" "С RLS и с индексами" "test_connect")
+    time_test2_3=$(extract_metrics "$result_test2_3" "time")
+    buffers_test2_3=$(extract_metrics "$result_test2_3" "buffers")
+
+    echo -e "${GREEN}Результаты ТЕСТА 2:${NC}"
+    echo -e "Без RLS и без индексов:    Время: ${time_test2_1}ms, Буферы: ${buffers_test2_1}"
+    echo -e "С RLS и без индексов:      Время: ${time_test2_2}ms, Буферы: ${buffers_test2_2}"
+    echo -e "С RLS и с индексами:       Время: ${time_test2_3}ms, Буферы: ${buffers_test2_3}"
+
+    echo -e "${BLUE}=== ТЕСТ 3: Запрос с агрегатными функциями ===${NC}"
+
+    QUERY3="SELECT s.status, COUNT(*) as count_students, AVG(LENGTH(s.last_name)) as avg_name_length
+            FROM app.students s
+            WHERE s.segment_id = 1000
+            GROUP BY s.status
+            HAVING COUNT(*) > 5;"
+
+    # Подтест 1: Без RLS и без индексов
+    echo -e "${BLUE}--- ПОДТЕСТ 3.1: Без RLS и без индексов ---${NC}"
+    manage_rls "disable"
+    manage_indexes "drop"
+    result_test3_1=$(run_explain_analyze "$QUERY3" "Без RLS и без индексов" "postgres")
+    time_test3_1=$(extract_metrics "$result_test3_1" "time")
+    buffers_test3_1=$(extract_metrics "$result_test3_1" "buffers")
+
+    # Подтест 2: С RLS и без индексов
+    echo -e "${BLUE}--- ПОДТЕСТ 3.2: С RLS и без индексов ---${NC}"
+    manage_rls "enable"
+    manage_indexes "drop"
+    result_test3_2=$(run_explain_analyze "$QUERY3" "С RLS и без индексов" "test_connect")
+    time_test3_2=$(extract_metrics "$result_test3_2" "time")
+    buffers_test3_2=$(extract_metrics "$result_test3_2" "buffers")
+
+    # Подтест 3: С RLS и с индексами
+    echo -e "${BLUE}--- ПОДТЕСТ 3.3: С RLS и с индексами ---${NC}"
+    manage_rls "enable"
+    manage_indexes "create"
+    result_test3_3=$(run_explain_analyze "$QUERY3" "С RLS и с индексами" "test_connect")
+    time_test3_3=$(extract_metrics "$result_test3_3" "time")
+    buffers_test3_3=$(extract_metrics "$result_test3_3" "buffers")
+
+    echo -e "${GREEN}Результаты ТЕСТА 3:${NC}"
+    echo -e "Без RLS и без индексов:    Время: ${time_test3_1}ms, Буферы: ${buffers_test3_1}"
+    echo -e "С RLS и без индексов:      Время: ${time_test3_2}ms, Буферы: ${buffers_test3_2}"
+    echo -e "С RLS и с индексами:       Время: ${time_test3_3}ms, Буферы: ${buffers_test3_3}"
+
+    # Восстановление исходного состояния
+    echo "Восстановление исходного состояния..."
+    manage_rls "enable"
+    manage_indexes "create"
+
+    # Очистка тестовых данных производительности
+    echo "Очистка тестовых данных производительности..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    DELETE FROM app.students WHERE student_id BETWEEN 10000 AND 20000;
+EOF
+
+    # Сброс прав
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+    REVOKE CONNECT ON DATABASE education_db FROM test_connect;
+    REVOKE USAGE ON SCHEMA app FROM test_connect;
+    REVOKE app_reader FROM test_connect;
+    REVOKE app_writer FROM test_connect;
+    DELETE FROM app.role_segments WHERE role_name = 'test_connect';"
+
+    echo -e "${YELLOW}=== КОНЕЦ ТЕСТИРОВАНИЯ ПРОИЗВОДИТЕЛЬНОСТИ RLS И ИНДЕКСОВ ===${NC}"
+    
+    exit 0
+fi
 
 # ====================================================================
 # ОСНОВНОЕ ТЕСТИРОВАНИЕ
