@@ -32,7 +32,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO app_reader;
 GRANT CONNECT ON DATABASE education_db TO app_writer;
 GRANT USAGE ON SCHEMA app TO app_writer;
 GRANT USAGE ON SCHEMA ref TO app_writer; 
-ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT, INSERT, UPDATE ON TABLES TO app_writer;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_writer;
 ALTER DEFAULT PRIVILEGES IN SCHEMA ref GRANT SELECT ON TABLES TO app_writer; --без справочников непонятно, что в бизнес-логике, однако запись необяз
 ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT USAGE ON SEQUENCES TO app_writer; -- без прав на автоинкремент не получится вставлять данные
 
@@ -1637,6 +1637,25 @@ FOR DELETE USING (
     app.check_segment_access(segment_id)
 );
 
+-- Для административных ролей отдельная политика
+CREATE POLICY admin_delete_policy ON app.students
+FOR DELETE TO app_owner, dml_admin
+USING (true);
+
+-- Для teachers
+CREATE POLICY delete_policy ON app.teachers
+FOR DELETE USING (app.check_segment_access(segment_id));
+
+CREATE POLICY admin_delete_policy ON app.teachers
+FOR DELETE TO app_owner, dml_admin USING (true);
+
+-- Для student_documents  
+CREATE POLICY delete_policy ON app.student_documents
+FOR DELETE USING (app.check_segment_access(segment_id));
+
+CREATE POLICY admin_delete_policy ON app.student_documents
+FOR DELETE TO app_owner, dml_admin USING (true);
+
 -- политики только для аудитора - полный доступ на чтение ко всем данным
 CREATE POLICY auditor_bypass_rls ON app.educational_institutions
     FOR SELECT TO auditor USING (true);
@@ -2098,7 +2117,6 @@ VALUES
      '192.168.1.107'::inet);
 */
 
--- Функция для запроса временных привилегий
 CREATE OR REPLACE FUNCTION app.request_temp_privilege(
     p_operation_name TEXT,
     p_duration_min INT DEFAULT 15
@@ -2115,11 +2133,6 @@ DECLARE
     v_allowed_operations TEXT[] := ARRAY['DELETE_STUDENT', 'DELETE_TEACHER', 'DELETE_DOCUMENT'];
     v_existing_access INT;
 BEGIN
-    -- Проверяем, что вызывающий - app_writer
-    IF NOT pg_has_role(v_caller_role, 'app_writer', 'MEMBER') THEN
-        RAISE EXCEPTION 'Временные привилегии доступны только для роли app_writer';
-    END IF;
-    
     -- Валидация входных параметров
     IF p_operation_name IS NULL OR p_duration_min IS NULL THEN
         RAISE EXCEPTION 'Название операции и длительность обязательны';
@@ -2135,12 +2148,13 @@ BEGIN
             p_operation_name, array_to_string(v_allowed_operations, ', ');
     END IF;
     
-    -- Проверяем, нет ли уже активного права на эту операцию
+    -- Проверяем активные привилегии в таблице
     SELECT COUNT(*) INTO v_existing_access
     FROM audit.temp_access_log
     WHERE caller_role = v_caller_role
         AND operation = p_operation_name
-        AND expires_at > CURRENT_TIMESTAMP;
+        AND expires_at > CURRENT_TIMESTAMP
+        AND used_at IS NULL;
     
     IF v_existing_access > 0 THEN
         RAISE EXCEPTION 'У вас уже есть активное право на операцию "%"', p_operation_name;
@@ -2174,43 +2188,24 @@ SET search_path = 'app, audit'
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_caller_role TEXT;
     v_has_access BOOLEAN := FALSE;
+    v_expires_at TIMESTAMP;
+    v_guc_value TEXT;
 BEGIN
-    SELECT m.rolname as role_name
-    INTO v_current_role
-    FROM pg_user u 
-    JOIN pg_auth_members am ON u.usesysid = am.member
-    JOIN pg_roles m ON am.roleid = m.oid
-    WHERE u.usename = session_user
-        AND has_function_privilege(m.rolname, 'app.create_patient(
-        VARCHAR(20),
-        VARCHAR(50),
-        VARCHAR(50), 
-        VARCHAR(50),
-        DATE,
-        CHAR(1),
-        VARCHAR(50),
-        VARCHAR(50),
-        VARCHAR(15),
-        VARCHAR(16),
-        INTEGER
-    )', 'EXECUTE')
-    LIMIT 1;
-
     -- Для административных ролей всегда разрешаем
-    IF v_caller_role = 'app_owner' OR 
-       v_caller_role = 'dml_admin' THEN
+    IF pg_has_role(session_user, 'app_owner', 'MEMBER') OR 
+       pg_has_role(session_user, 'dml_admin', 'MEMBER') THEN
         RETURN TRUE;
     END IF;
     
-    -- Для app_writer проверяем временные права
-    IF v_caller_role = 'app_writer' THEN
+    -- Для app_writer проверяем временные права через таблицу
+    IF pg_has_role(session_user, 'app_writer', 'MEMBER') THEN
         SELECT EXISTS(
             SELECT 1 FROM audit.temp_access_log
-            WHERE caller_role = v_caller_role
+            WHERE caller_role = session_user
                 AND operation = p_operation_name
                 AND expires_at > CURRENT_TIMESTAMP
+                AND used_at IS NULL
         ) INTO v_has_access;
         
         RETURN v_has_access;
@@ -2220,6 +2215,8 @@ BEGIN
 END;
 $$;
 
+GRANT EXECUTE ON FUNCTION app.check_temp_privilege TO PUBLIC;
+
 -- Trigger функция для студентов
 CREATE OR REPLACE FUNCTION app.check_student_delete_privilege()
 RETURNS TRIGGER
@@ -2228,8 +2225,7 @@ AS $$
 BEGIN
     IF NOT app.check_temp_privilege('DELETE_STUDENT') THEN
         RAISE EXCEPTION 
-            'Для удаления студентов требуется временная привилегия. ' ||
-            'Выполните: SELECT app.request_temp_privilege(''DELETE_STUDENT'', N);';
+            'Для удаления студентов требуется временная привилегия. Выполните: SELECT app.request_temp_privilege(''DELETE_STUDENT'', N);';
     END IF;
     RETURN OLD;
 END;
@@ -2243,8 +2239,7 @@ AS $$
 BEGIN
     IF NOT app.check_temp_privilege('DELETE_TEACHER') THEN
         RAISE EXCEPTION 
-            'Для удаления преподавателей требуется временная привилегия. ' ||
-            'Выполните: SELECT app.request_temp_privilege(''DELETE_TEACHER'', N);';
+            'Для удаления преподавателей требуется временная привилегия. Выполните: SELECT app.request_temp_privilege(''DELETE_TEACHER'', N);';
     END IF;
     RETURN OLD;
 END;
@@ -2258,8 +2253,7 @@ AS $$
 BEGIN
     IF NOT app.check_temp_privilege('DELETE_DOCUMENT') THEN
         RAISE EXCEPTION 
-            'Для удаления документов требуется временная привилегия. ' ||
-            'Выполните: SELECT app.request_temp_privilege(''DELETE_DOCUMENT'', N);';
+            'Для удаления документов требуется временная привилегия. Выполните: SELECT app.request_temp_privilege(''DELETE_DOCUMENT'', N);';
     END IF;
     RETURN OLD;
 END;

@@ -13,13 +13,16 @@ NC='\033[0m' # No Color
 PERFORMANCE_TEST=false
 
 # Обработка аргументов командной строки
-while getopts "e" opt; do
+while getopts "ej" opt; do
     case $opt in
         e)
             PERFORMANCE_TEST=true
             ;;
+        j)
+            JIT_ACCESS_TEST=true
+            ;;
         \?)
-            echo "Использование: $0 [-e]"
+            echo "Использование: $0 [-e] [-j]"
             exit 1
             ;;
     esac
@@ -576,6 +579,290 @@ EOF
     DELETE FROM app.role_segments WHERE role_name = 'test_connect';"
 
     echo -e "${YELLOW}=== КОНЕЦ ТЕСТИРОВАНИЯ ПРОИЗВОДИТЕЛЬНОСТИ RLS И ИНДЕКСОВ ===${NC}"
+    
+    exit 0
+fi
+
+if [ "$JIT_ACCESS_TEST" = true ]; then
+    echo -e "${YELLOW}=== ЗАПУСК ТЕСТИРОВАНИЯ JIT ACCESS СИСТЕМЫ ===${NC}"
+    
+    # Подготовка тестовых данных
+    create_test_segments
+    prepare_test_data
+    
+    # Создаем дополнительных тестовых студентов, преподавателей и документы
+    echo "Подготовка тестовых данных для JIT Access..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Вместо segment_id = 1000 используем segment_id = 1
+    INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, email) VALUES 
+    (3000, 'JIT_Студент1', 'ДляУдаления', 'JIT_DELETE1', 1, 1, 'jit_delete1@test.ru'),
+    (3001, 'JIT_Студент2', 'ДляУдаления', 'JIT_DELETE2', 1, 1, 'jit_delete2@test.ru'),
+    (3002, 'JIT_Студент3', 'ДляУдаления', 'JIT_DELETE3', 1, 1, 'jit_delete3@test.ru')
+    ON CONFLICT (student_id) DO UPDATE SET 
+        last_name = EXCLUDED.last_name,
+        segment_id = EXCLUDED.segment_id;
+
+    -- Аналогично для преподавателей и документов
+    INSERT INTO app.teachers (teacher_id, last_name, first_name, academic_degree, academic_title, segment_id) VALUES 
+    (3000, 'JIT_Преподаватель1', 'ДляУдаления', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1),
+    (3001, 'JIT_Преподаватель2', 'ДляУдаления', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1),
+    (3002, 'JIT_Преподаватель3', 'ДляУдаления', 'Нет'::public.academic_degree_enum, 'Нет'::public.academic_title_enum, 1)
+    ON CONFLICT (teacher_id) DO UPDATE SET 
+        last_name = EXCLUDED.last_name,
+        segment_id = EXCLUDED.segment_id;
+
+    INSERT INTO app.student_documents (student_id, document_type, document_number, segment_id) VALUES 
+    (3000, 'Паспорт'::public.document_type_enum, 'JIT_DOC1', 1),
+    (3001, 'ИНН'::public.document_type_enum, 'JIT_DOC2', 1),
+    (3002, 'СНИЛС'::public.document_type_enum, 'JIT_DOC3', 1)
+    ON CONFLICT DO NOTHING;
+EOF
+
+    # Настройка test_connect как app_writer с сегментом 1000
+    echo "Настройка test_connect как app_writer..."
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+    GRANT CONNECT ON DATABASE education_db TO test_connect;
+    GRANT USAGE ON SCHEMA app TO test_connect;
+    GRANT app_reader TO test_connect;
+    GRANT app_writer TO test_connect;
+    DELETE FROM app.role_segments WHERE role_name = 'test_connect';
+    INSERT INTO app.role_segments (role_name, segment_id) VALUES ('test_connect', 1);"
+
+    # ТЕСТ 1: Удаление документов студентов
+    echo -e "${BLUE}=== ТЕСТ 1: УДАЛЕНИЕ ДОКУМЕНТОВ СТУДЕНТОВ ===${NC}"
+    echo -e "${CYAN}--- Удаление документа студента ---${NC}"
+    
+    # Попытка удаления БЕЗ временной привилегии
+    echo -e "${PURPLE}Попытка удаления БЕЗ временной привилегии:${NC}"
+    result_no_privilege=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        DELETE FROM app.student_documents WHERE student_id = 3001;
+    " 2>&1)
+    
+    # Проверяем что удаление заблокировано (DELETE 0 и нет ошибки)
+    if echo "$result_no_privilege" | grep -qi "требуется временная привилегия"; then
+        echo -e "${GREEN}✓ УСПЕХ: Удаление заблокировано (как и ожидалось)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Удаление должно было быть заблокировано${NC}"
+        echo "Результат: $result_no_privilege"
+    fi
+    
+    # Запрос временной привилегии
+    echo -e "${CYAN}Запрос временной привилегии для DELETE_DOCUMENT...${NC}"
+    privilege_result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.request_temp_privilege('DELETE_DOCUMENT', 1);
+    " 2>&1)
+    
+    if echo "$privilege_result" | grep -qi "временный доступ предоставлен"; then
+        echo -e "${GREEN}✓ Временная привилегия предоставлена${NC}"
+    else
+        echo -e "${RED}✗ Ошибка при запросе привилегии${NC}"
+        echo "$privilege_result"
+    fi
+    
+    # Попытка удаления С временной привилегией
+    echo -e "${PURPLE}Попытка удаления С временной привилегией:${NC}"
+    result_with_privilege=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        SELECT * FROM app.student_documents WHERE student_id = 3001;
+        DELETE FROM app.student_documents WHERE student_id = 3001;
+        SELECT * FROM app.student_documents WHERE student_id = 3001;
+    " 2>&1)
+    
+    # Проверяем что действительно удалилась строка (DELETE 1)
+    if echo "$result_with_privilege" | grep -q "DELETE 1"; then
+        echo -e "${GREEN}✓ УСПЕХ: Удаление выполнено (DELETE 1)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Удаление не выполнено${NC}"
+        echo "Результат: $result_with_privilege"
+    fi
+    
+    echo ""
+
+    # ТЕСТ 2: Удаление преподавателей  
+    echo -e "${BLUE}=== ТЕСТ 2: УДАЛЕНИЕ ПРЕПОДАВАТЕЛЕЙ ===${NC}"
+    echo -e "${CYAN}--- Удаление преподавателя ---${NC}"
+    
+    # Попытка удаления БЕЗ временной привилегии
+    echo -e "${PURPLE}Попытка удаления БЕЗ временной привилегии:${NC}"
+    result_no_privilege=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        DELETE FROM app.teachers WHERE teacher_id = 3000;
+    " 2>&1)
+
+    # Проверяем что удаление заблокировано (DELETE 0 и нет ошибки)
+    if echo "$result_no_privilege" | grep -qi "требуется временная привилегия"; then
+        echo -e "${GREEN}✓ УСПЕХ: Удаление заблокировано (как и ожидалось)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Удаление должно было быть заблокировано${NC}"
+        echo "Результат: $result_no_privilege"
+    fi
+    
+    # Запрос временной привилегии
+    echo -e "${CYAN}Запрос временной привилегии для DELETE_TEACHER...${NC}"
+    privilege_result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.request_temp_privilege('DELETE_TEACHER', 1);
+    " 2>&1)
+    
+    if echo "$privilege_result" | grep -qi "временный доступ предоставлен"; then
+        echo -e "${GREEN}✓ Временная привилегия предоставлена${NC}"
+    else
+        echo -e "${RED}✗ Ошибка при запросе привилегии${NC}"
+        echo "$privilege_result"
+    fi
+    
+    # Попытка удаления С временной привилегией
+    echo -e "${PURPLE}Попытка удаления С временной привилегией:${NC}"
+    result_with_privilege=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        DELETE FROM app.teachers WHERE teacher_id = 3000;
+    " 2>&1)
+    
+    # Проверяем что действительно удалилась строка (DELETE 1)
+    if echo "$result_with_privilege" | grep -q "DELETE 1"; then
+        echo -e "${GREEN}✓ УСПЕХ: Удаление выполнено (DELETE 1)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Удаление не выполнено${NC}"
+        echo "Результат: $result_with_privilege"
+    fi
+
+    # ТЕСТ 3: Удаление студентов
+    echo -e "${BLUE}=== ТЕСТ 3: УДАЛЕНИЕ СТУДЕНТОВ ===${NC}"
+    echo -e "${CYAN}--- Удаление студента ---${NC}"
+    
+    # Попытка удаления БЕЗ временной привилегии
+    echo -e "${PURPLE}Попытка удаления БЕЗ временной привилегии:${NC}"
+    result_no_privilege=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        DELETE FROM app.students WHERE student_id = 3000;
+    " 2>&1)
+    
+    if echo "$result_no_privilege" | grep -qi "требуется временная привилегия"; then
+        echo -e "${GREEN}✓ УСПЕХ: Удаление заблокировано (как и ожидалось)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Удаление должно было быть заблокировано${NC}"
+        echo "$result_no_privilege"
+    fi
+    
+    # Запрос временной привилегии
+    echo -e "${CYAN}Запрос временной привилегии для DELETE_STUDENT...${NC}"
+    privilege_result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.request_temp_privilege('DELETE_STUDENT', 1);
+    " 2>&1)
+    
+    if echo "$privilege_result" | grep -qi "временный доступ предоставлен"; then
+        echo -e "${GREEN}✓ Временная привилегия предоставлена${NC}"
+    else
+        echo -e "${RED}✗ Ошибка при запросе привилегии${NC}"
+        echo "$privilege_result"
+    fi
+    
+    # Попытка удаления С временной привилегией
+    echo -e "${PURPLE}Попытка удаления С временной привилегией:${NC}"
+    result_with_privilege=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        DELETE FROM app.students WHERE student_id = 3000;
+    " 2>&1)
+    
+    # Проверяем что действительно удалилась строка (DELETE 1)
+    if echo "$result_with_privilege" | grep -q "DELETE 1"; then
+        echo -e "${GREEN}✓ УСПЕХ: Удаление выполнено (DELETE 1)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Удаление не выполнено${NC}"
+        echo "Результат: $result_with_privilege"
+    fi
+    
+    echo ""
+
+    # ТЕСТ 4: Попытка повторного запроса привилегии
+    echo -e "${BLUE}=== ТЕСТ 4: ПОВТОРНЫЙ ЗАПРОС ПРИВИЛЕГИИ ===${NC}"
+    echo -e "${PURPLE}Попытка повторного запроса привилегии DELETE_STUDENT...${NC}"
+    
+    duplicate_request=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.request_temp_privilege('DELETE_STUDENT', 5);" 2>&1)
+    
+    if echo "$duplicate_request" | grep -qi "уже есть активное право"; then
+        echo -e "${GREEN}✓ УСПЕХ: Повторный запрос правильно отклонен${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Повторный запрос не должен был быть разрешен${NC}"
+        echo "Результат: $duplicate_request"
+    fi
+    echo ""
+
+    # ТЕСТ 5: Проверка истечения срока действия привилегии
+    echo -e "${BLUE}=== ТЕСТ 5: ПРОВЕРКА ИСТЕЧЕНИЯ СРОКА ДЕЙСТВИЯ ===${NC}"
+    
+    # Запрашиваем привилегию на 1 минуту
+    echo "Запрос привилегии DELETE_TEACHER на 1 минуту..."
+    sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.request_temp_privilege('DELETE_TEACHER', 1);" > /dev/null 2>&1
+    
+    echo "Ожидание 70 секунд для истечения срока действия..."
+    sleep 70
+    
+    echo "Попытка удаления после истечения срока:"
+    expired_result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        SELECT app.set_session_ctx(1);
+        DELETE FROM app.teachers WHERE teacher_id = 3001;" 2>&1)
+    
+    # Проверяем что удаление заблокировано после истечения срока
+    if echo "$expired_result" | grep -qi "требуется временная привилегия"; then
+        echo -e "${GREEN}✓ УСПЕХ: Привилегия корректно истекла${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Привилегия все еще действует после истечения срока${NC}"
+        echo "Результат: $expired_result"
+    fi
+    echo ""
+
+     # ТЕСТ 6: Проверка разных ролей
+    echo -e "${BLUE}=== ТЕСТ 6: ПРОВЕРКА РАЗНЫХ РОЛЕЙ ===${NC}"
+    
+    # Проверяем, что app_owner может удалять без временных привилегий
+    echo -e "${CYAN}Проверка app_owner (должен удалять без временных привилегий):${NC}"
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+        GRANT app_owner TO test_connect;" > /dev/null 2>&1
+    
+    owner_result=$(sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
+        DELETE FROM app.teachers WHERE teacher_id = 3002;" 2>&1)
+    
+    if echo "$owner_result" | grep -q "DELETE 1"; then
+        echo -e "${GREEN}✓ УСПЕХ: app_owner может удалять без временных привилегий (DELETE 1)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: app_owner не может удалять${NC}"
+        echo "Результат: $owner_result"
+    fi
+    
+    # Убираем роль app_owner
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+        REVOKE app_owner FROM test_connect;" > /dev/null 2>&1
+    echo ""
+
+    # Финальная проверка аудита
+    echo -e "${BLUE}=== ФИНАЛЬНАЯ ПРОВЕРКА АУДИТА ===${NC}"
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "
+        SELECT 
+            operation,
+            COUNT(*) as total_requests,
+            COUNT(*) FILTER (WHERE expires_at > NOW()) as active_privileges
+        FROM audit.temp_access_log 
+        WHERE caller_role = 'test_connect'
+        GROUP BY operation
+        ORDER BY operation;"
+
+    # Очистка тестовых данных
+    echo "Очистка тестовых данных JIT Access..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    DELETE FROM app.student_documents WHERE student_id IN (3000, 3001, 3002);
+    DELETE FROM app.students WHERE student_id IN (3000, 3001, 3002);
+    DELETE FROM app.teachers WHERE teacher_id IN (3000, 3001, 3002);
+    DELETE FROM audit.temp_access_log WHERE caller_role = 'test_connect';
+EOF
+
+    # Сброс прав
+    reset_test_connect
+    cleanup_test_data
+
+    echo -e "${YELLOW}=== КОНЕЦ ТЕСТИРОВАНИЯ JIT ACCESS СИСТЕМЫ ===${NC}"
     
     exit 0
 fi
