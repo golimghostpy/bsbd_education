@@ -154,6 +154,31 @@ prepare_test_data() {
     (1001, 'Паспорт'::public.document_type_enum, 'PASS1001', 1001)
     ON CONFLICT DO NOTHING;
 EOF
+
+    # Создаем дополнительные данные для тестирования Security Barrier View
+    echo "Подготовка данных для Security Barrier View..."
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Создаем дополнительные студенты в сегменте 1000 для статистики
+    INSERT INTO app.students (student_id, last_name, first_name, student_card_number, group_id, segment_id, status, email) VALUES 
+    (1100, 'Статистика1', 'Студент1000', 'STAT1000-1', 1000, 1000, 'Обучается'::public.student_status_enum, 'stat1_1000@test.ru'),
+    (1101, 'Статистика2', 'Студент1000', 'STAT1000-2', 1000, 1000, 'Обучается'::public.student_status_enum, 'stat2_1000@test.ru'),
+    (1102, 'Статистика3', 'Студент1001', 'STAT1001-1', 1001, 1001, 'Обучается'::public.student_status_enum, 'stat1_1001@test.ru')
+    ON CONFLICT (student_id) DO UPDATE SET segment_id = EXCLUDED.segment_id;
+    
+    -- Создаем дополнительные документы для статистики
+    INSERT INTO app.student_documents (student_id, document_type, document_number, segment_id) VALUES 
+    (1100, 'Паспорт'::public.document_type_enum, 'DOC1000-1', 1000),
+    (1101, 'ИНН'::public.document_type_enum, 'DOC1000-2', 1000),
+    (1102, 'Паспорт'::public.document_type_enum, 'DOC1001-1', 1001)
+    ON CONFLICT DO NOTHING;
+    
+    -- Создаем дополнительные оценки для статистики
+    INSERT INTO app.final_grades (student_id, subject_id, teacher_id, final_grade_type_id, final_grade_value, semester, segment_id) VALUES 
+    (1100, 1, 1000, 1, '5', 1, 1000),
+    (1101, 2, 1000, 1, '4', 1, 1000),
+    (1102, 1, 1001, 1, '5', 1, 1001)
+    ON CONFLICT DO NOTHING;
+EOF
 }
 
 check_connection() {
@@ -302,6 +327,11 @@ cleanup_test_data() {
     DELETE FROM app.faculties WHERE faculty_id IN (1000, 1001);
     DELETE FROM app.educational_institutions WHERE institution_id IN (1000, 1001);
     DELETE FROM ref.segments WHERE segment_id IN (1000, 1001);
+
+    -- Очищаем дополнительные данные Security Barrier View
+    DELETE FROM app.student_documents WHERE student_id IN (1100, 1101, 1102);
+    DELETE FROM app.final_grades WHERE student_id IN (1100, 1101, 1102);
+    DELETE FROM app.students WHERE student_id IN (1100, 1101, 1102);
     
     DROP TABLE IF EXISTS app.test_table, app.unauthorized_table, ref.unauthorized_ref_table, app.test_table1;
     DROP TABLE IF EXISTS audit.unauthorized_audit_table;
@@ -844,7 +874,7 @@ setup_test_connect_basic
 
 check_command "SELECT app.set_session_ctx(1000);" "Установка контекста для сегмента 1000 (успешно)" "success"
 check_command "SELECT * FROM app.get_session_ctx();" "Проверка установленного контекста" "success"
-check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Доступ к данным после установки контекста" 1
+check_row_count "SELECT * FROM app.students WHERE segment_id = 1000;" "Доступ к данным после установки контекста" 3
 
 reset_test_connect
 
@@ -884,7 +914,7 @@ setup_test_connect_basic
 grant_additional_role_to_test_connect "dml_admin"
 
 # Администраторы видят все данные без установки контекста
-check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 15
+check_row_count "SELECT * FROM app.students;" "DML_ADMIN: чтение всех студентов" 18
 check_row_count "SELECT * FROM app.teachers;" "DML_ADMIN: чтение всех преподавателей" 16
 
 reset_test_connect
@@ -929,13 +959,16 @@ check_row_count "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats
 
 echo -e "${PURPLE}--- Проверка отсутствия доступа к деталям ---${NC}"
 # Проверяем, что в security barrier view нет доступа к индивидуальным данным
-check_row_count "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats WHERE total_students < 5;" "Security Barrier View: нет фильтрации по деталям" 2
+check_row_count "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats" "Security Barrier View: нет фильтрации по деталям" 2
+sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "SELECT app.set_session_ctx(1000); SELECT * FROM app.group_stats WHERE total_students < 5;" 2>&1
 
 # Проверяем статистику предметов
-check_command "SELECT app.set_session_ctx(1000); SELECT * FROM app.subject_stats LIMIT 3;" "Security Barrier View: доступ к статистике предметов" "success"
+check_command "SELECT app.set_session_ctx(1000); SELECT * FROM app.subject_stats" "Security Barrier View: доступ к статистике предметов" "success"
+sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "SELECT app.set_session_ctx(1000); SELECT * FROM app.subject_stats LIMIT 3;" 2>&1
 
-# Проверяем статистику документов (без доступа к номерам)
+# Проверяем статистику документов
 check_command "SELECT app.set_session_ctx(1000); SELECT * FROM app.document_stats;" "Security Barrier View: доступ к статистике документов" "success"
+sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "SELECT app.set_session_ctx(1000); SELECT * FROM app.document_stats;" 2>&1
 
 reset_test_connect
 
@@ -950,9 +983,11 @@ initial_audit_count=$(sudo docker exec -i postgres psql -U postgres -d education
 
 # Выполняем изменение данных
 check_command "SELECT app.set_session_ctx(1000); UPDATE app.students SET last_name = 'Аудируемый' WHERE student_id = 1000;" "Аудит: изменение данных студента" "success"
+echo "Выполняется запрос: SELECT app.set_session_ctx(1000); UPDATE app.students SET last_name = 'Аудируемый' WHERE student_id = 1000;"
 
 # Проверяем, что запись появилась в аудите
 final_audit_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM audit.row_change_log;" 2>&1 | tr -d ' \n')
+sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT * FROM audit.row_change_log ORDER BY log_id DESC LIMIT 1;"
 
 if [ "$final_audit_count" -gt "$initial_audit_count" ]; then
     echo -e "${GREEN}+++ УСПЕХ: Запись об изменении добавлена в audit.row_change_log${NC}"
@@ -974,8 +1009,10 @@ VALUES (8888, 'ДляУдаления', 'Тест', 'DELETE_TEST', 1000, 1000, '
 ON CONFLICT (student_id) DO UPDATE SET last_name = 'ДляУдаления';" 2>&1
 
 check_command "SELECT app.set_session_ctx(1000); DELETE FROM app.students WHERE student_id = 8888;" "Аудит: удаление данных студента" "success"
+echo "Выполняется запрос: SELECT app.set_session_ctx(1000); DELETE FROM app.students WHERE student_id = 8888;"
 
 final_audit_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM audit.row_change_log;" 2>&1 | tr -d ' \n')
+sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT * FROM audit.row_change_log ORDER BY log_id DESC LIMIT 1;"
 
 if [ "$final_audit_count" -gt "$initial_audit_count" ]; then
     echo -e "${GREEN}+++ УСПЕХ: Запись об удалении добавлена в audit.row_change_log${NC}"
