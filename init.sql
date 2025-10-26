@@ -314,6 +314,17 @@ CREATE TABLE audit.row_change_log_archive (
     client_ip INET
 );
 
+-- 3.5 Таблица для логирования временных доступов
+CREATE TABLE audit.temp_access_log (
+    access_id SERIAL PRIMARY KEY,
+    request_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    caller_role VARCHAR(100) NOT NULL,
+    operation VARCHAR(100) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP,
+    client_ip INET
+);
+
 -- Добавление внешних ключей, которые ссылаются на таблицу teachers
 
 -- Ректор учебного заведения
