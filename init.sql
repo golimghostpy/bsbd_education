@@ -314,6 +314,17 @@ CREATE TABLE audit.row_change_log_archive (
     client_ip INET
 );
 
+-- 3.5 Таблица для логирования временных доступов
+CREATE TABLE audit.temp_access_log (
+    access_id SERIAL PRIMARY KEY,
+    request_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    caller_role VARCHAR(100) NOT NULL,
+    operation VARCHAR(100) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP,
+    client_ip INET
+);
+
 -- Добавление внешних ключей, которые ссылаются на таблицу teachers
 
 -- Ректор учебного заведения
@@ -1626,6 +1637,25 @@ FOR DELETE USING (
     app.check_segment_access(segment_id)
 );
 
+-- Для административных ролей отдельная политика
+CREATE POLICY admin_delete_policy ON app.students
+FOR DELETE TO app_owner, dml_admin
+USING (true);
+
+-- Для teachers
+CREATE POLICY delete_policy ON app.teachers
+FOR DELETE USING (app.check_segment_access(segment_id));
+
+CREATE POLICY admin_delete_policy ON app.teachers
+FOR DELETE TO app_owner, dml_admin USING (true);
+
+-- Для student_documents  
+CREATE POLICY delete_policy ON app.student_documents
+FOR DELETE USING (app.check_segment_access(segment_id));
+
+CREATE POLICY admin_delete_policy ON app.student_documents
+FOR DELETE TO app_owner, dml_admin USING (true);
+
 -- политики только для аудитора - полный доступ на чтение ко всем данным
 CREATE POLICY auditor_bypass_rls ON app.educational_institutions
     FOR SELECT TO auditor USING (true);
@@ -2067,6 +2097,7 @@ $$;
 
 GRANT EXECUTE ON FUNCTION audit.backup_audit_logs TO security_admin, auditor;
 
+/*
 -- исуственное создание старых логов
 INSERT INTO audit.row_change_log (change_time, table_name, operation, user_name, old_data, new_data, client_ip)
 VALUES 
@@ -2084,3 +2115,164 @@ VALUES
      '{"last_name": "Кузнецов", "first_name": "Сергей", "academic_degree": "Кандидат наук"}'::jsonb,
      NULL,
      '192.168.1.107'::inet);
+*/
+
+CREATE OR REPLACE FUNCTION app.request_temp_privilege(
+    p_operation_name TEXT,
+    p_duration_min INT DEFAULT 15
+)
+RETURNS TEXT
+SECURITY DEFINER
+SET search_path = 'app, audit, public'
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_caller_role TEXT := session_user;
+    v_expires_at TIMESTAMP;
+    v_access_id INT;
+    v_allowed_operations TEXT[] := ARRAY['DELETE_STUDENT', 'DELETE_TEACHER', 'DELETE_DOCUMENT'];
+    v_existing_access INT;
+BEGIN
+    -- Валидация входных параметров
+    IF p_operation_name IS NULL OR p_duration_min IS NULL THEN
+        RAISE EXCEPTION 'Название операции и длительность обязательны';
+    END IF;
+    
+    IF p_duration_min <= 0 OR p_duration_min > 1440 THEN
+        RAISE EXCEPTION 'Длительность должна быть от 1 до 1440 минут';
+    END IF;
+    
+    -- Проверяем, разрешена ли операция
+    IF NOT (p_operation_name = ANY(v_allowed_operations)) THEN
+        RAISE EXCEPTION 'Операция "%" не разрешена. Разрешены: %', 
+            p_operation_name, array_to_string(v_allowed_operations, ', ');
+    END IF;
+    
+    -- Проверяем активные привилегии в таблице
+    SELECT COUNT(*) INTO v_existing_access
+    FROM audit.temp_access_log
+    WHERE caller_role = v_caller_role
+        AND operation = p_operation_name
+        AND expires_at > CURRENT_TIMESTAMP
+        AND used_at IS NULL;
+    
+    IF v_existing_access > 0 THEN
+        RAISE EXCEPTION 'У вас уже есть активное право на операцию "%"', p_operation_name;
+    END IF;
+    
+    -- Вычисляем время истечения
+    v_expires_at := CURRENT_TIMESTAMP + (p_duration_min || ' minutes')::INTERVAL;
+    
+    -- Записываем запрос в лог
+    INSERT INTO audit.temp_access_log (
+        caller_role, operation, expires_at, client_ip
+    ) VALUES (
+        v_caller_role, p_operation_name, v_expires_at, inet_client_addr()
+    ) RETURNING access_id INTO v_access_id;
+    
+    RETURN 'Временный доступ предоставлен для операции "' || p_operation_name || 
+           '" до ' || to_char(v_expires_at, 'DD.MM.YYYY HH24:MI:SS') || 
+           ' (ID доступа: ' || v_access_id || ')';
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.request_temp_privilege TO app_writer;
+
+-- Функция проверки активной временной привилегии
+CREATE OR REPLACE FUNCTION app.check_temp_privilege(
+    p_operation_name TEXT
+)
+RETURNS BOOLEAN
+SECURITY DEFINER
+SET search_path = 'app, audit'
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_has_access BOOLEAN := FALSE;
+    v_expires_at TIMESTAMP;
+    v_guc_value TEXT;
+BEGIN
+    -- Для административных ролей всегда разрешаем
+    IF pg_has_role(session_user, 'app_owner', 'MEMBER') OR 
+       pg_has_role(session_user, 'dml_admin', 'MEMBER') THEN
+        RETURN TRUE;
+    END IF;
+    
+    -- Для app_writer проверяем временные права через таблицу
+    IF pg_has_role(session_user, 'app_writer', 'MEMBER') THEN
+        SELECT EXISTS(
+            SELECT 1 FROM audit.temp_access_log
+            WHERE caller_role = session_user
+                AND operation = p_operation_name
+                AND expires_at > CURRENT_TIMESTAMP
+                AND used_at IS NULL
+        ) INTO v_has_access;
+        
+        RETURN v_has_access;
+    END IF;
+    
+    RETURN FALSE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.check_temp_privilege TO PUBLIC;
+
+-- Trigger функция для студентов
+CREATE OR REPLACE FUNCTION app.check_student_delete_privilege()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT app.check_temp_privilege('DELETE_STUDENT') THEN
+        RAISE EXCEPTION 
+            'Для удаления студентов требуется временная привилегия. Выполните: SELECT app.request_temp_privilege(''DELETE_STUDENT'', N);';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+-- Trigger функция для преподавателей
+CREATE OR REPLACE FUNCTION app.check_teacher_delete_privilege()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT app.check_temp_privilege('DELETE_TEACHER') THEN
+        RAISE EXCEPTION 
+            'Для удаления преподавателей требуется временная привилегия. Выполните: SELECT app.request_temp_privilege(''DELETE_TEACHER'', N);';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+-- Trigger функция для документов студентов
+CREATE OR REPLACE FUNCTION app.check_document_delete_privilege()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT app.check_temp_privilege('DELETE_DOCUMENT') THEN
+        RAISE EXCEPTION 
+            'Для удаления документов требуется временная привилегия. Выполните: SELECT app.request_temp_privilege(''DELETE_DOCUMENT'', N);';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+-- Trigger для студентов
+CREATE TRIGGER tr_check_student_delete
+    BEFORE DELETE ON app.students
+    FOR EACH ROW
+    EXECUTE FUNCTION app.check_student_delete_privilege();
+
+-- Trigger для преподавателей
+CREATE TRIGGER tr_check_teacher_delete
+    BEFORE DELETE ON app.teachers
+    FOR EACH ROW
+    EXECUTE FUNCTION app.check_teacher_delete_privilege();
+
+-- Trigger для документов студентов
+CREATE TRIGGER tr_check_document_delete
+    BEFORE DELETE ON app.student_documents
+    FOR EACH ROW
+    EXECUTE FUNCTION app.check_document_delete_privilege();
