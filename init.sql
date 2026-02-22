@@ -321,7 +321,6 @@ CREATE TABLE audit.temp_access_log (
     caller_role VARCHAR(100) NOT NULL,
     operation VARCHAR(100) NOT NULL,
     expires_at TIMESTAMP NOT NULL,
-    used_at TIMESTAMP,
     client_ip INET
 );
 
@@ -2153,8 +2152,7 @@ BEGIN
     FROM audit.temp_access_log
     WHERE caller_role = v_caller_role
         AND operation = p_operation_name
-        AND expires_at > CURRENT_TIMESTAMP
-        AND used_at IS NULL;
+        AND expires_at > CURRENT_TIMESTAMP;
     
     IF v_existing_access > 0 THEN
         RAISE EXCEPTION 'У вас уже есть активное право на операцию "%"', p_operation_name;
@@ -2205,7 +2203,6 @@ BEGIN
             WHERE caller_role = session_user
                 AND operation = p_operation_name
                 AND expires_at > CURRENT_TIMESTAMP
-                AND used_at IS NULL
         ) INTO v_has_access;
         
         RETURN v_has_access;
