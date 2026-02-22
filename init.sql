@@ -610,7 +610,7 @@ INSERT INTO app.faculties (faculty_id, faculty_name, dean_id, institution_id, se
 (1, 'Факультет компьютерных наук', 1, 1, 1),
 (2, 'Экономический факультет', 2, 1, 1),
 -- НИУ ВШЭ - СПб
-(3, 'Факультет Санкт-Петербургская школа экономики и менеджмента', 3, 2, 2),
+(3, 'Факультет экономики и менеджмента', 3, 2, 2),
 (4, 'Юридический факультет', 4, 2, 2),
 -- НИУ ВШЭ - НН
 (5, 'Факультет информатики, математики и компьютерных наук', 5, 3, 3),
@@ -2403,3 +2403,353 @@ CREATE TRIGGER tr_check_document_delete
     BEFORE DELETE ON app.student_documents
     FOR EACH ROW
     EXECUTE FUNCTION app.check_document_delete_privilege();
+
+-- =======================================================================
+-- БЛОК А: Метрики за всё время (сканирование всех секций)
+-- =======================================================================
+
+-- 1. LTV (Lifetime Value) - вся прибыль от клиента за весь период
+CREATE OR REPLACE FUNCTION app.calculate_ltv_all_time()
+RETURNS TABLE(
+    out_student_id INTEGER,
+    out_student_name TEXT,
+    out_ltv NUMERIC
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, public'
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH student_payments AS (
+        -- Собираем все платежи по каждому студенту (сканирует ВСЕ секции)
+        SELECT 
+            s.student_id,
+            CONCAT(s.last_name, ' ', s.first_name, ' ', COALESCE(s.patronymic, '')) AS full_name,
+            sp.payment_date,
+            sp.amount
+        FROM app.students s
+        JOIN app.study_payments_partitioned sp ON s.student_id = sp.student_id
+        WHERE app.check_segment_access(s.segment_id)
+          AND app.check_segment_access(sp.segment_id)
+    ),
+    student_first_last_payment AS (
+        -- Находим первую и последнюю дату покупки для каждого студента
+        SELECT 
+            sp.student_id,
+            sp.full_name,
+            MIN(sp.payment_date) AS first_payment,
+            MAX(sp.payment_date) AS last_payment,
+            SUM(sp.amount) AS total_ltv
+        FROM student_payments sp
+        GROUP BY sp.student_id, sp.full_name
+    )
+    -- Финальный результат
+    SELECT 
+        sflp.student_id,
+        sflp.full_name::TEXT,
+        sflp.total_ltv
+    FROM student_first_last_payment sflp
+    WHERE sflp.first_payment IS NOT NULL 
+      AND sflp.last_payment IS NOT NULL
+    ORDER BY sflp.total_ltv DESC;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.calculate_ltv_all_time() TO app_reader, app_writer, dml_admin, auditor;
+
+-- 2. AOV (Average Order Value) - средний чек клиента (Топ-5)
+CREATE OR REPLACE FUNCTION app.calculate_top5_aov()
+RETURNS TABLE(
+    out_student_id INTEGER,
+    out_student_name TEXT,
+    out_avg_order_value NUMERIC,
+    out_total_orders BIGINT,
+    out_total_amount NUMERIC
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, public'
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH student_orders AS (
+        -- Группируем платежи по студентам: сумма и количество (сканирует ВСЕ секции)
+        SELECT 
+            s.student_id,
+            CONCAT(s.last_name, ' ', s.first_name, ' ', COALESCE(s.patronymic, '')) AS full_name,
+            COUNT(sp.payment_id) AS order_count,
+            SUM(sp.amount) AS total_spent
+        FROM app.students s
+        JOIN app.study_payments_partitioned sp ON s.student_id = sp.student_id
+        WHERE app.check_segment_access(s.segment_id)
+          AND app.check_segment_access(sp.segment_id)
+        GROUP BY s.student_id, s.last_name, s.first_name, s.patronymic
+    ),
+    student_aov AS (
+        -- Рассчитываем средний чек
+        SELECT 
+            so.student_id,
+            so.full_name,
+            so.order_count,
+            so.total_spent,
+            ROUND(so.total_spent / NULLIF(so.order_count, 0)::NUMERIC, 2) AS aov
+        FROM student_orders so
+        WHERE so.order_count > 0
+    )
+    -- Топ-5 по среднему чеку
+    SELECT 
+        sa.student_id,
+        sa.full_name::TEXT,
+        sa.aov,
+        sa.order_count,
+        sa.total_spent
+    FROM student_aov sa
+    ORDER BY sa.aov DESC
+    LIMIT 5;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.calculate_top5_aov() TO app_reader, app_writer, dml_admin, auditor;
+
+
+-- =======================================================================
+-- БЛОК Б: Метрики за отчетный период (последний месяц - секция partition_current)
+-- =======================================================================
+
+-- 3. ARPU (Average Revenue Per User) за последний месяц
+CREATE OR REPLACE FUNCTION app.calculate_arpu_last_month()
+RETURNS TABLE(
+    out_period_start DATE,
+    out_period_end DATE,
+    out_total_revenue NUMERIC,
+    out_active_clients_count BIGINT,
+    out_arpu NUMERIC
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, public'
+AS $$
+DECLARE
+    v_start_date DATE;
+    v_end_date DATE;
+BEGIN
+    -- Границы текущей секции (partition_current)
+    v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
+    v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
+    
+    RETURN QUERY
+    WITH monthly_revenue AS (
+        -- Доход за последний месяц (сканирует ТОЛЬКО partition_current)
+        SELECT 
+            COALESCE(SUM(sp.amount), 0) AS total_revenue
+        FROM app.study_payments_partitioned sp
+        WHERE sp.payment_date >= v_start_date 
+          AND sp.payment_date < v_end_date
+          AND app.check_segment_access(sp.segment_id)
+    ),
+    active_clients AS (
+        -- Активные клиенты (хотя бы раз совершившие покупку за всё время)
+        -- Это сканирует ВСЕ секции, так как нужно за всё время
+        SELECT 
+            COUNT(DISTINCT sp.student_id) AS client_count
+        FROM app.study_payments_partitioned sp
+        WHERE app.check_segment_access(sp.segment_id)
+    )
+    -- ARPU = доход месяца / кол-во активных клиентов
+    SELECT 
+        v_start_date,
+        v_end_date,
+        mr.total_revenue,
+        ac.client_count,
+        ROUND(mr.total_revenue / NULLIF(ac.client_count, 0)::NUMERIC, 2)
+    FROM monthly_revenue mr, active_clients ac;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.calculate_arpu_last_month() TO app_reader, app_writer, dml_admin, auditor;
+
+-- 4. ARPPU (Average Revenue Per Paying User) за последний месяц
+-- Эта функция демонстрирует PARTITION PRUNING - сканируется только partition_current
+CREATE OR REPLACE FUNCTION app.calculate_arppu_last_month()
+RETURNS TABLE(
+    out_period_start DATE,
+    out_period_end DATE,
+    out_total_revenue NUMERIC,
+    out_paying_clients_count BIGINT,
+    out_arppu NUMERIC
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, public'
+AS $$
+DECLARE
+    v_start_date DATE;
+    v_end_date DATE;
+BEGIN
+    -- Границы текущей секции (partition_current)
+    v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
+    v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
+    
+    RETURN QUERY
+    WITH monthly_paying_clients AS (
+        -- Платящие клиенты за последний месяц
+        -- Благодаря фильтру по payment_date сканируется ТОЛЬКО partition_current
+        -- Остальные секции игнорируются (Partition Pruning)
+        SELECT 
+            sp.student_id,
+            SUM(sp.amount) AS client_revenue
+        FROM app.study_payments_partitioned sp
+        WHERE sp.payment_date >= v_start_date 
+          AND sp.payment_date < v_end_date
+          AND app.check_segment_access(sp.segment_id)
+        GROUP BY sp.student_id
+    ),
+    monthly_stats AS (
+        -- Статистика за месяц
+        SELECT 
+            COUNT(mpc.student_id) AS paying_count,
+            COALESCE(SUM(mpc.client_revenue), 0) AS total_revenue
+        FROM monthly_paying_clients mpc
+    )
+    -- ARPPU = доход месяца / кол-во платящих клиентов
+    SELECT 
+        v_start_date,
+        v_end_date,
+        ms.total_revenue,
+        ms.paying_count,
+        ROUND(ms.total_revenue / NULLIF(ms.paying_count, 0)::NUMERIC, 2)
+    FROM monthly_stats ms;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.calculate_arppu_last_month() TO app_reader, app_writer, dml_admin, auditor;
+
+-- 5. Топ-3 популярных специальностей за последний месяц
+CREATE OR REPLACE FUNCTION app.get_top3_popular_specialties_last_month()
+RETURNS TABLE(
+    out_specialty_name TEXT,
+    out_payment_count BIGINT,
+    out_total_amount NUMERIC,
+    out_unique_students BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, public'
+AS $$
+DECLARE
+    v_start_date DATE;
+    v_end_date DATE;
+BEGIN
+    -- Границы текущей секции (partition_current)
+    v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
+    v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
+    
+    RETURN QUERY
+    WITH last_month_payments AS (
+        -- Платежи за последний месяц (сканирует ТОЛЬКО partition_current)
+        SELECT 
+            sp.payment_id,
+            sp.student_id,
+            sp.amount,
+            sg.faculty_id,
+            f.faculty_name AS specialty_name
+        FROM app.study_payments_partitioned sp
+        JOIN app.students s ON sp.student_id = s.student_id
+        JOIN app.study_groups sg ON s.group_id = sg.group_id
+        JOIN app.faculties f ON sg.faculty_id = f.faculty_id
+        WHERE sp.payment_date >= v_start_date 
+          AND sp.payment_date < v_end_date
+          AND app.check_segment_access(sp.segment_id)
+          AND app.check_segment_access(s.segment_id)
+          AND app.check_segment_access(sg.segment_id)
+          AND app.check_segment_access(f.segment_id)
+    ),
+    specialty_stats AS (
+        -- Агрегация по специальностям
+        SELECT 
+            lmp.specialty_name,
+            COUNT(lmp.payment_id) AS payment_count,
+            COUNT(DISTINCT lmp.student_id) AS students_count,
+            SUM(lmp.amount) AS total_amount
+        FROM last_month_payments lmp
+        GROUP BY lmp.specialty_name
+    )
+    -- Топ-3 по количеству платежей
+    SELECT 
+        ss.specialty_name::TEXT,
+        ss.payment_count,
+        ss.total_amount,
+        ss.students_count
+    FROM specialty_stats ss
+    ORDER BY ss.payment_count DESC
+    LIMIT 3;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.get_top3_popular_specialties_last_month() TO app_reader, app_writer, dml_admin, auditor;
+
+-- 6. Топ-3 непопулярных специальностей за последний месяц
+CREATE OR REPLACE FUNCTION app.get_top3_unpopular_specialties_last_month()
+RETURNS TABLE(
+    out_specialty_name TEXT,
+    out_payment_count BIGINT,
+    out_total_amount NUMERIC,
+    out_unique_students BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, public'
+AS $$
+DECLARE
+    v_start_date DATE;
+    v_end_date DATE;
+BEGIN
+    -- Границы текущей секции (partition_current)
+    v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
+    v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
+    
+    RETURN QUERY
+    WITH last_month_payments AS (
+        -- Платежи за последний месяц (сканирует ТОЛЬКО partition_current)
+        SELECT 
+            sp.payment_id,
+            sp.student_id,
+            sp.amount,
+            sg.faculty_id,
+            f.faculty_name AS specialty_name
+        FROM app.study_payments_partitioned sp
+        JOIN app.students s ON sp.student_id = s.student_id
+        JOIN app.study_groups sg ON s.group_id = sg.group_id
+        JOIN app.faculties f ON sg.faculty_id = f.faculty_id
+        WHERE sp.payment_date >= v_start_date 
+          AND sp.payment_date < v_end_date
+          AND app.check_segment_access(sp.segment_id)
+          AND app.check_segment_access(s.segment_id)
+          AND app.check_segment_access(sg.segment_id)
+          AND app.check_segment_access(f.segment_id)
+    ),
+    all_specialties_with_payments AS (
+        -- Агрегация по специальностям (только те, по которым были платежи)
+        SELECT 
+            lmp.specialty_name,
+            COUNT(lmp.payment_id) AS payment_count,
+            COUNT(DISTINCT lmp.student_id) AS students_count,
+            SUM(lmp.amount) AS total_amount
+        FROM last_month_payments lmp
+        GROUP BY lmp.specialty_name
+        HAVING COUNT(lmp.payment_id) > 0
+    )
+    -- Топ-3 по минимальному количеству платежей
+    SELECT 
+        aswp.specialty_name::TEXT,
+        aswp.payment_count,
+        aswp.total_amount,
+        aswp.students_count
+    FROM all_specialties_with_payments aswp
+    ORDER BY aswp.payment_count ASC
+    LIMIT 3;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.get_top3_unpopular_specialties_last_month() TO app_reader, app_writer, dml_admin, auditor;
