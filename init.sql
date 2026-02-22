@@ -2420,6 +2420,15 @@ SECURITY DEFINER
 SET search_path = 'app, public'
 AS $$
 BEGIN
+    -- Логируем вызов функции
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'calculate_ltv_all_time',
+        session_user,
+        jsonb_build_object('action', 'LTV calculation for all students'),
+        true
+    );
+    
     RETURN QUERY
     WITH student_payments AS (
         -- Собираем все платежи по каждому студенту (сканирует ВСЕ секции)
@@ -2453,6 +2462,17 @@ BEGIN
     WHERE sflp.first_payment IS NOT NULL 
       AND sflp.last_payment IS NOT NULL
     ORDER BY sflp.total_ltv DESC;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'calculate_ltv_all_time',
+            session_user,
+            jsonb_build_object('action', 'LTV calculation', 'error', SQLERRM),
+            false
+        );
+        RAISE;
 END;
 $$;
 
@@ -2472,6 +2492,15 @@ SECURITY DEFINER
 SET search_path = 'app, public'
 AS $$
 BEGIN
+    -- Логируем вызов функции
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'calculate_top5_aov',
+        session_user,
+        jsonb_build_object('action', 'Top 5 AOV calculation'),
+        true
+    );
+    
     RETURN QUERY
     WITH student_orders AS (
         -- Группируем платежи по студентам: сумма и количество (сканирует ВСЕ секции)
@@ -2507,6 +2536,17 @@ BEGIN
     FROM student_aov sa
     ORDER BY sa.aov DESC
     LIMIT 5;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'calculate_top5_aov',
+            session_user,
+            jsonb_build_object('action', 'Top 5 AOV calculation', 'error', SQLERRM),
+            false
+        );
+        RAISE;
 END;
 $$;
 
@@ -2538,6 +2578,19 @@ BEGIN
     v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
     v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
     
+    -- Логируем вызов функции
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'calculate_arpu_last_month',
+        session_user,
+        jsonb_build_object(
+            'period_start', v_start_date,
+            'period_end', v_end_date,
+            'action', 'ARPU calculation'
+        ),
+        true
+    );
+    
     RETURN QUERY
     WITH monthly_revenue AS (
         -- Доход за последний месяц (сканирует ТОЛЬКО partition_current)
@@ -2564,13 +2617,28 @@ BEGIN
         ac.client_count,
         ROUND(mr.total_revenue / NULLIF(ac.client_count, 0)::NUMERIC, 2)
     FROM monthly_revenue mr, active_clients ac;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'calculate_arpu_last_month',
+            session_user,
+            jsonb_build_object(
+                'period_start', v_start_date,
+                'period_end', v_end_date,
+                'action', 'ARPU calculation',
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
 END;
 $$;
 
 GRANT EXECUTE ON FUNCTION app.calculate_arpu_last_month() TO app_reader, app_writer, dml_admin, auditor;
 
 -- 4. ARPPU (Average Revenue Per Paying User) за последний месяц
--- Эта функция демонстрирует PARTITION PRUNING - сканируется только partition_current
 CREATE OR REPLACE FUNCTION app.calculate_arppu_last_month()
 RETURNS TABLE(
     out_period_start DATE,
@@ -2591,11 +2659,22 @@ BEGIN
     v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
     v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
     
+    -- Логируем вызов функции
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'calculate_arppu_last_month',
+        session_user,
+        jsonb_build_object(
+            'period_start', v_start_date,
+            'period_end', v_end_date,
+            'action', 'ARPPU calculation'
+        ),
+        true
+    );
+    
     RETURN QUERY
     WITH monthly_paying_clients AS (
         -- Платящие клиенты за последний месяц
-        -- Благодаря фильтру по payment_date сканируется ТОЛЬКО partition_current
-        -- Остальные секции игнорируются (Partition Pruning)
         SELECT 
             sp.student_id,
             SUM(sp.amount) AS client_revenue
@@ -2620,6 +2699,22 @@ BEGIN
         ms.paying_count,
         ROUND(ms.total_revenue / NULLIF(ms.paying_count, 0)::NUMERIC, 2)
     FROM monthly_stats ms;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'calculate_arppu_last_month',
+            session_user,
+            jsonb_build_object(
+                'period_start', v_start_date,
+                'period_end', v_end_date,
+                'action', 'ARPPU calculation',
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
 END;
 $$;
 
@@ -2644,6 +2739,19 @@ BEGIN
     -- Границы текущей секции (partition_current)
     v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
     v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
+    
+    -- Логируем вызов функции
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'get_top3_popular_specialties_last_month',
+        session_user,
+        jsonb_build_object(
+            'period_start', v_start_date,
+            'period_end', v_end_date,
+            'action', 'Top 3 popular specialties'
+        ),
+        true
+    );
     
     RETURN QUERY
     WITH last_month_payments AS (
@@ -2684,6 +2792,22 @@ BEGIN
     FROM specialty_stats ss
     ORDER BY ss.payment_count DESC
     LIMIT 3;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'get_top3_popular_specialties_last_month',
+            session_user,
+            jsonb_build_object(
+                'period_start', v_start_date,
+                'period_end', v_end_date,
+                'action', 'Top 3 popular specialties',
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
 END;
 $$;
 
@@ -2708,6 +2832,19 @@ BEGIN
     -- Границы текущей секции (partition_current)
     v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
     v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
+    
+    -- Логируем вызов функции
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+    VALUES (
+        'get_top3_unpopular_specialties_last_month',
+        session_user,
+        jsonb_build_object(
+            'period_start', v_start_date,
+            'period_end', v_end_date,
+            'action', 'Top 3 unpopular specialties'
+        ),
+        true
+    );
     
     RETURN QUERY
     WITH last_month_payments AS (
@@ -2749,6 +2886,22 @@ BEGIN
     FROM all_specialties_with_payments aswp
     ORDER BY aswp.payment_count ASC
     LIMIT 3;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку
+        INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
+        VALUES (
+            'get_top3_unpopular_specialties_last_month',
+            session_user,
+            jsonb_build_object(
+                'period_start', v_start_date,
+                'period_end', v_end_date,
+                'action', 'Top 3 unpopular specialties',
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
 END;
 $$;
 
