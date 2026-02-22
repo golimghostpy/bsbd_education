@@ -101,6 +101,8 @@ CREATE TYPE control_type_enum AS ENUM ('Экзамен', 'Зачет');
 CREATE TYPE day_of_week_enum AS ENUM ('Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота');
 CREATE TYPE lesson_type_enum AS ENUM ('Лекция', 'Практика', 'Лабораторная');
 CREATE TYPE document_type_enum AS ENUM ('Паспорт', 'Аттестат', 'Диплом', 'Мед. справка', 'ИНН', 'СНИЛС', 'Другое');
+CREATE TYPE payment_status_enum AS ENUM ('Оплачено', 'Не оплачено', 'Возврат');
+CREATE TYPE study_type_enum AS ENUM ('Бюджетная основа', 'Платная основа', 'Целевое обучение');
 
 -- 1. Схема ref (остались только дисциплины и типы оценок)
 
@@ -180,6 +182,7 @@ CREATE TABLE app.students (
     phone_number VARCHAR(20),
     group_id INT NOT NULL,
     status student_status_enum NOT NULL DEFAULT 'Обучается',
+    study_type study_type_enum NOT NULL DEFAULT 'Платная основа',
     FOREIGN KEY (group_id) REFERENCES app.study_groups(group_id)
 );
 
@@ -269,6 +272,39 @@ CREATE TABLE app.student_documents (
     issuing_authority TEXT,
     FOREIGN KEY (student_id) REFERENCES app.students(student_id) ON DELETE CASCADE
 );
+
+--2.13. Оплата обучения
+CREATE TABLE app.study_payments (
+    payment_id SERIAL PRIMARY KEY,
+    student_id INT NOT NULL,
+    payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    semester INT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL CHECK (amount > 0),
+    payment_status payment_status_enum DEFAULT 'Оплачено',
+    FOREIGN KEY (student_id) REFERENCES app.students(student_id)
+);
+
+-- 2.14. Создаём новую секционированную таблицу, полностью повторяющую структуру исходной
+CREATE TABLE app.study_payments_partitioned (
+    payment_id SERIAL,
+    student_id INT NOT NULL,
+    payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    semester INT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL CHECK (amount > 0),
+    payment_status payment_status_enum DEFAULT 'Оплачено',
+    -- PK должен включать поле секционирования
+    PRIMARY KEY (payment_id, payment_date),
+    FOREIGN KEY (student_id) REFERENCES app.students(student_id)
+) PARTITION BY RANGE (payment_date);
+
+-- Создаём структуру секций
+-- partition_archive: для старых данных (прошлые годы)
+CREATE TABLE app.study_payments_archive PARTITION OF app.study_payments_partitioned
+FOR VALUES FROM ('2020-01-01') TO (CURRENT_DATE - INTERVAL '1 month');
+
+-- partition_current: для данных за последний месяц (отчетный период)
+CREATE TABLE app.study_payments_current PARTITION OF app.study_payments_partitioned
+FOR VALUES FROM (CURRENT_DATE - INTERVAL '1 month') TO (CURRENT_DATE + INTERVAL '1 day');
 
 -- 3 Схема audit (Audit - аудит и логирование)
 
@@ -435,6 +471,18 @@ FOREIGN KEY (segment_id) REFERENCES ref.segments(segment_id);
 ALTER TABLE app.student_documents ADD COLUMN segment_id INT NOT NULL;
 ALTER TABLE app.student_documents 
 ADD CONSTRAINT fk_documents_segment 
+FOREIGN KEY (segment_id) REFERENCES ref.segments(segment_id);
+
+-- 2.12. Оплата обучения
+ALTER TABLE app.study_payments ADD COLUMN segment_id INT NOT NULL;
+ALTER TABLE app.study_payments 
+ADD CONSTRAINT fk_payment_segment 
+FOREIGN KEY (segment_id) REFERENCES ref.segments(segment_id);
+
+-- 2.12. Оплата обучения (секции)
+ALTER TABLE app.study_payments_partitioned ADD COLUMN segment_id INT NOT NULL;
+ALTER TABLE app.study_payments_partitioned 
+ADD CONSTRAINT fk_payment_segment 
 FOREIGN KEY (segment_id) REFERENCES ref.segments(segment_id);
 
 -- 3. Таблицы-связки для студентов и преподавателей (многие-ко-многим)
@@ -629,28 +677,40 @@ INSERT INTO app.study_groups (group_id, group_name, admission_year, faculty_id, 
 (14, 'ПМ2301', 2023, 14, 7);
 
 -- 8. Затем students
-INSERT INTO app.students (student_id, last_name, first_name, patronymic, student_card_number, email, phone_number, group_id, status, segment_id) VALUES
--- НИУ ВШЭ - Москва
-(1, 'Соколов', 'Александр', 'Игоревич', 'ВШЭ-М-2023-001', 'sokolov@edu.hse.ru', '+7-900-200-01-01', 1, 'Обучается', 1),
-(2, 'Орлова', 'Виктория', 'Сергеевна', 'ВШЭ-М-2023-002', 'orlova@edu.hse.ru', '+7-900-200-01-02', 1, 'Обучается', 1),
--- НИУ ВШЭ - СПб
-(3, 'Лебедев', 'Максим', 'Александрович', 'ВШЭ-СПб-2023-001', 'lebedev@edu.hse.spb.ru', '+7-900-200-01-03', 3, 'Обучается', 2),
-(4, 'Егорова', 'Анастасия', 'Дмитриевна', 'ВШЭ-СПб-2023-002', 'egorova@edu.hse.spb.ru', '+7-900-200-01-04', 3, 'Академический отпуск', 2),
--- НИУ ВШЭ - НН
-(5, 'Козлов', 'Артем', 'Витальевич', 'ВШЭ-НН-2023-001', 'kozlov@edu.hse.nn.ru', '+7-900-200-01-05', 5, 'Обучается', 3),
-(6, 'Новикова', 'Екатерина', 'Андреевна', 'ВШЭ-НН-2023-002', 'novikova@edu.hse.nn.ru', '+7-900-200-01-06', 5, 'Обучается', 3),
--- МГУ
-(7, 'Морозов', 'Иван', 'Олегович', 'МГУ-2023-001', 'morozov@edu.msu.ru', '+7-900-200-01-07', 7, 'Отчислен', 4),
-(8, 'Павлова', 'София', 'Романовна', 'МГУ-2023-002', 'pavlova@edu.msu.ru', '+7-900-200-01-08', 7, 'Обучается', 4),
--- МФТИ
-(9, 'Волков', 'Кирилл', 'Иванович', 'МФТИ-2023-001', 'volkov@edu.phystech.ru', '+7-900-200-01-09', 9, 'Обучается', 5),
-(10, 'Андреева', 'Дарья', 'Викторовна', 'МФТИ-2023-002', 'andreeva@edu.phystech.ru', '+7-900-200-01-10', 9, 'Выпустился', 5),
--- РУДН
-(11, 'Петров', 'Дмитрий', 'Сергеевич', 'РУДН-2023-001', 'petrov@edu.rudn.ru', '+7-900-200-01-11', 11, 'Обучается', 6),
-(12, 'Сидорова', 'Мария', 'Алексеевна', 'РУДН-2023-002', 'sidorova@edu.rudn.ru', '+7-900-200-01-12', 11, 'Обучается', 6),
--- НГТУ
-(13, 'Кузнецов', 'Алексей', 'Владимирович', 'НГТУ-2023-001', 'kuznetsov@edu.nstu.ru', '+7-900-200-01-13', 13, 'Обучается', 7),
-(14, 'Иванова', 'Анна', 'Петровна', 'НГТУ-2023-002', 'ivanova@edu.nstu.ru', '+7-900-200-01-14', 13, 'Обучается', 7);
+-- Обновлённая вставка студентов с типами обучения
+INSERT INTO app.students (student_id, last_name, first_name, patronymic, student_card_number, email, phone_number, group_id, status, segment_id, study_type) VALUES
+-- НИУ ВШЭ - Москва (segment_id = 1)
+(1, 'Соколов', 'Александр', 'Игоревич', 'ВШЭ-М-2023-001', 'sokolov@edu.hse.ru', '+7-900-200-01-01', 1, 'Обучается', 1, 'Бюджетная основа'),
+(2, 'Орлова', 'Виктория', 'Сергеевна', 'ВШЭ-М-2023-002', 'orlova@edu.hse.ru', '+7-900-200-01-02', 1, 'Обучается', 1, 'Платная основа'),
+-- Добавим ещё одного студента с целевым
+(15, 'Морозов', 'Денис', 'Алексеевич', 'ВШЭ-М-2023-015', 'morozov.den@edu.hse.ru', '+7-900-200-01-15', 2, 'Обучается', 1, 'Целевое обучение'),
+
+-- НИУ ВШЭ - СПб (segment_id = 2)
+(3, 'Лебедев', 'Максим', 'Александрович', 'ВШЭ-СПб-2023-001', 'lebedev@edu.hse.spb.ru', '+7-900-200-01-03', 3, 'Обучается', 2, 'Платная основа'),
+(4, 'Егорова', 'Анастасия', 'Дмитриевна', 'ВШЭ-СПб-2023-002', 'egorova@edu.hse.spb.ru', '+7-900-200-01-04', 3, 'Академический отпуск', 2, 'Платная основа'),
+
+-- НИУ ВШЭ - НН (segment_id = 3)
+(5, 'Козлов', 'Артем', 'Витальевич', 'ВШЭ-НН-2023-001', 'kozlov@edu.hse.nn.ru', '+7-900-200-01-05', 5, 'Обучается', 3, 'Платная основа'),
+(6, 'Новикова', 'Екатерина', 'Андреевна', 'ВШЭ-НН-2023-002', 'novikova@edu.hse.nn.ru', '+7-900-200-01-06', 5, 'Обучается', 3, 'Целевое обучение'),
+
+-- МГУ (segment_id = 4)
+(7, 'Морозов', 'Иван', 'Олегович', 'МГУ-2023-001', 'morozov@edu.msu.ru', '+7-900-200-01-07', 7, 'Отчислен', 4, 'Платная основа'),
+(8, 'Павлова', 'София', 'Романовна', 'МГУ-2023-002', 'pavlova@edu.msu.ru', '+7-900-200-01-08', 7, 'Обучается', 4, 'Платная основа'),
+
+-- МФТИ (segment_id = 5)
+(9, 'Волков', 'Кирилл', 'Иванович', 'МФТИ-2023-001', 'volkov@edu.phystech.ru', '+7-900-200-01-09', 9, 'Обучается', 5, 'Бюджетная основа'),
+(10, 'Андреева', 'Дарья', 'Викторовна', 'МФТИ-2023-002', 'andreeva@edu.phystech.ru', '+7-900-200-01-10', 9, 'Выпустился', 5, 'Платная основа'),
+
+-- РУДН (segment_id = 6)
+(11, 'Петров', 'Дмитрий', 'Сергеевич', 'РУДН-2023-001', 'petrov@edu.rudn.ru', '+7-900-200-01-11', 11, 'Обучается', 6, 'Целевое обучение'),
+(12, 'Сидорова', 'Мария', 'Алексеевна', 'РУДН-2023-002', 'sidorova@edu.rudn.ru', '+7-900-200-01-12', 11, 'Обучается', 6, 'Платная основа'),
+
+-- НГТУ (segment_id = 7)
+(13, 'Кузнецов', 'Алексей', 'Владимирович', 'НГТУ-2023-001', 'kuznetsov@edu.nstu.ru', '+7-900-200-01-13', 13, 'Обучается', 7, 'Платная основа'),
+(14, 'Иванова', 'Анна', 'Петровна', 'НГТУ-2023-002', 'ivanova@edu.nstu.ru', '+7-900-200-01-14', 13, 'Обучается', 7, 'Платная основа');
+
+-- Сброс последовательности на корректное значение (т.к. добавили student_id=15)
+SELECT setval('app.students_student_id_seq', (SELECT MAX(student_id) FROM app.students));
 
 -- 9. Теперь academic_plans (после всех зависимостей)
 INSERT INTO app.academic_plans (group_id, subject_id, semester, total_hours, lecture_hours, practice_hours, control_type, segment_id) VALUES
@@ -847,6 +907,76 @@ INSERT INTO app.teacher_institutions (teacher_id, institution_id, segment_id, em
 (7, 5, 5, '2019-09-01', 'Профессор', false),  -- Батаев также в МФТИ
 (9, 5, 5, '2016-09-01', 'Профессор', true),   -- Алексеев в МФТИ (основное)
 (9, 4, 4, '2018-09-01', 'Профессор', false);  -- Алексеев также в МГУ
+
+-- Генерируем оплаты только для студентов с типом 'Платная основа'
+WITH paying_students AS (
+    -- Получаем всех студентов-платников с их группами
+    SELECT 
+        s.student_id,
+        s.segment_id,
+        sg.admission_year
+    FROM app.students s
+    JOIN app.study_groups sg ON s.group_id = sg.group_id
+    WHERE s.study_type = 'Платная основа'
+      AND s.status IN ('Обучается', 'Академический отпуск')
+),
+all_semesters AS (
+    -- Для каждого студента создаём семестры с 1 по текущий
+    SELECT 
+        student_id,
+        segment_id,
+        generate_series(
+            1, 
+            (EXTRACT(YEAR FROM CURRENT_DATE) - admission_year) * 2 + 2
+        ) as semester_num
+    FROM paying_students
+    WHERE (EXTRACT(YEAR FROM CURRENT_DATE) - admission_year) * 2 + 2 > 0
+),
+payments_to_insert AS (
+    SELECT 
+        student_id,
+        -- Распределяем даты: 40% в последний месяц, остальные равномерно за 2 года
+        CASE 
+            WHEN random() < 0.4 THEN 
+                -- Платежи за последний месяц
+                CURRENT_DATE - (random() * 30)::int
+            ELSE 
+                -- Старые платежи (равномерно за последние 2 года)
+                CURRENT_DATE - (random() * 700 + 30)::int
+        END::date as payment_date,
+        semester_num,
+        -- Сумма: от 30 до 60 тысяч
+        30000 + (random() * 30000)::int as amount,
+        segment_id
+    FROM all_semesters
+    CROSS JOIN generate_series(1, 2) as payments_per_semester  -- по 2 платежа на семестр
+)
+INSERT INTO app.study_payments (
+    student_id, 
+    payment_date, 
+    semester, 
+    amount, 
+    payment_status, 
+    segment_id
+)
+SELECT 
+    student_id,
+    payment_date,
+    semester_num,
+    amount,
+    'Оплачено'::payment_status_enum,
+    segment_id
+FROM payments_to_insert
+WHERE payment_date < CURRENT_DATE
+  AND random() < 0.95;  -- 95% успешных платежей
+
+-- Переносим данные из оригинальной таблицы в секционированную
+INSERT INTO app.study_payments_partitioned (
+    payment_id, student_id, payment_date, semester, amount, payment_status, segment_id
+)
+SELECT 
+    payment_id, student_id, payment_date, semester, amount, payment_status, segment_id
+FROM app.study_payments;
 
 --logon trigger
 CREATE OR REPLACE FUNCTION audit.login_audit()
