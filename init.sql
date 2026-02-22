@@ -2476,16 +2476,13 @@ EXCEPTION
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION app.calculate_ltv_all_time() TO app_reader, app_writer, dml_admin, auditor;
-
 -- 2. AOV (Average Order Value) - средний чек клиента (Топ-5)
 CREATE OR REPLACE FUNCTION app.calculate_top5_aov()
 RETURNS TABLE(
     out_student_id INTEGER,
     out_student_name TEXT,
     out_avg_order_value NUMERIC,
-    out_total_orders BIGINT,
-    out_total_amount NUMERIC
+    out_total_orders BIGINT
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2521,7 +2518,6 @@ BEGIN
             so.student_id,
             so.full_name,
             so.order_count,
-            so.total_spent,
             ROUND(so.total_spent / NULLIF(so.order_count, 0)::NUMERIC, 2) AS aov
         FROM student_orders so
         WHERE so.order_count > 0
@@ -2531,8 +2527,7 @@ BEGIN
         sa.student_id,
         sa.full_name::TEXT,
         sa.aov,
-        sa.order_count,
-        sa.total_spent
+        sa.order_count
     FROM student_aov sa
     ORDER BY sa.aov DESC
     LIMIT 5;
@@ -2549,9 +2544,6 @@ EXCEPTION
         RAISE;
 END;
 $$;
-
-GRANT EXECUTE ON FUNCTION app.calculate_top5_aov() TO app_reader, app_writer, dml_admin, auditor;
-
 
 -- =======================================================================
 -- БЛОК Б: Метрики за отчетный период (последний месяц - секция partition_current)
@@ -2636,13 +2628,9 @@ EXCEPTION
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION app.calculate_arpu_last_month() TO app_reader, app_writer, dml_admin, auditor;
-
 -- 4. ARPPU (Average Revenue Per Paying User) за последний месяц
 CREATE OR REPLACE FUNCTION app.calculate_arppu_last_month()
 RETURNS TABLE(
-    out_period_start DATE,
-    out_period_end DATE,
     out_total_revenue NUMERIC,
     out_paying_clients_count BIGINT,
     out_arppu NUMERIC
@@ -2651,22 +2639,13 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = 'app, public'
 AS $$
-DECLARE
-    v_start_date DATE;
-    v_end_date DATE;
 BEGIN
-    -- Границы текущей секции (partition_current)
-    v_start_date := (CURRENT_DATE - INTERVAL '1 month')::DATE;
-    v_end_date := (CURRENT_DATE + INTERVAL '1 day')::DATE;
-    
     -- Логируем вызов функции
     INSERT INTO audit.function_calls (function_name, caller_role, input_params, success)
     VALUES (
         'calculate_arppu_last_month',
         session_user,
         jsonb_build_object(
-            'period_start', v_start_date,
-            'period_end', v_end_date,
             'action', 'ARPPU calculation'
         ),
         true
@@ -2678,10 +2657,8 @@ BEGIN
         SELECT 
             sp.student_id,
             SUM(sp.amount) AS client_revenue
-        FROM app.study_payments_partitioned sp
-        WHERE sp.payment_date >= v_start_date 
-          AND sp.payment_date < v_end_date
-          AND app.check_segment_access(sp.segment_id)
+        FROM app.study_payments_current sp
+        WHERE app.check_segment_access(sp.segment_id)
         GROUP BY sp.student_id
     ),
     monthly_stats AS (
@@ -2692,9 +2669,7 @@ BEGIN
         FROM monthly_paying_clients mpc
     )
     -- ARPPU = доход месяца / кол-во платящих клиентов
-    SELECT 
-        v_start_date,
-        v_end_date,
+    SELECT
         ms.total_revenue,
         ms.paying_count,
         ROUND(ms.total_revenue / NULLIF(ms.paying_count, 0)::NUMERIC, 2)
@@ -2707,8 +2682,6 @@ EXCEPTION
             'calculate_arppu_last_month',
             session_user,
             jsonb_build_object(
-                'period_start', v_start_date,
-                'period_end', v_end_date,
                 'action', 'ARPPU calculation',
                 'error', SQLERRM
             ),
@@ -2717,8 +2690,6 @@ EXCEPTION
         RAISE;
 END;
 $$;
-
-GRANT EXECUTE ON FUNCTION app.calculate_arppu_last_month() TO app_reader, app_writer, dml_admin, auditor;
 
 -- 5. Топ-3 популярных специальностей за последний месяц
 CREATE OR REPLACE FUNCTION app.get_top3_popular_specialties_last_month()
@@ -2810,8 +2781,6 @@ EXCEPTION
         RAISE;
 END;
 $$;
-
-GRANT EXECUTE ON FUNCTION app.get_top3_popular_specialties_last_month() TO app_reader, app_writer, dml_admin, auditor;
 
 -- 6. Топ-3 непопулярных специальностей за последний месяц
 CREATE OR REPLACE FUNCTION app.get_top3_unpopular_specialties_last_month()
@@ -2905,4 +2874,42 @@ EXCEPTION
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION app.arppu_analyze()
+RETURNS TABLE(explain_line TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, ref'
+AS $$
+BEGIN
+    RETURN QUERY
+    EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+    WITH monthly_paying_clients AS (
+        SELECT 
+            sp.student_id,
+            SUM(sp.amount) AS client_revenue
+        FROM app.study_payments_current sp
+        WHERE app.check_segment_access(sp.segment_id)
+        GROUP BY sp.student_id
+    ),
+    monthly_stats AS (
+        SELECT 
+            COUNT(mpc.student_id) AS paying_count,
+            COALESCE(SUM(mpc.client_revenue), 0) AS total_revenue
+        FROM monthly_paying_clients mpc
+    )
+    SELECT
+        ms.total_revenue,
+        ms.paying_count,
+        ROUND(ms.total_revenue / NULLIF(ms.paying_count, 0)::NUMERIC, 2)
+    FROM monthly_stats ms;
+END;
+$$;
+
+-- ВЫДАЧА ПРАВ ДЛЯ МЕТРИК
+GRANT EXECUTE ON FUNCTION app.calculate_ltv_all_time() TO app_reader, app_writer, dml_admin, auditor;
+GRANT EXECUTE ON FUNCTION app.calculate_top5_aov() TO app_reader, app_writer, dml_admin, auditor;
+GRANT EXECUTE ON FUNCTION app.calculate_arpu_last_month() TO app_reader, app_writer, dml_admin, auditor;
+GRANT EXECUTE ON FUNCTION app.calculate_arppu_last_month() TO app_reader, app_writer, dml_admin, auditor;
+GRANT EXECUTE ON FUNCTION app.get_top3_popular_specialties_last_month() TO app_reader, app_writer, dml_admin, auditor;
 GRANT EXECUTE ON FUNCTION app.get_top3_unpopular_specialties_last_month() TO app_reader, app_writer, dml_admin, auditor;
+GRANT EXECUTE ON FUNCTION app.arppu_analyze() TO ddl_admin, security_admin;
