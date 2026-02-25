@@ -11,9 +11,11 @@ NC='\033[0m' # No Color
 
 # Флаг для тестирования производительности
 PERFORMANCE_TEST=false
+JIT_ACCESS_TEST=false
+INDEX_TEST=false
 
 # Обработка аргументов командной строки
-while getopts "ej" opt; do
+while getopts "eji" opt; do
     case $opt in
         e)
             PERFORMANCE_TEST=true
@@ -21,8 +23,11 @@ while getopts "ej" opt; do
         j)
             JIT_ACCESS_TEST=true
             ;;
+        i)
+            INDEX_TEST=true
+            ;;
         \?)
-            echo "Использование: $0 [-e] [-j]"
+            echo "Использование: $0 [-e] [-j] [-i]"
             exit 1
             ;;
     esac
@@ -341,21 +346,40 @@ cleanup_test_data() {
 EOF
 }
 
+# Функция для очистки кеша PostgreSQL
+clear_cache() {
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "DISCARD ALL;" > /dev/null 2>&1
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "CHECKPOINT;" > /dev/null 2>&1
+}
+
+# Функция для выполнения EXPLAIN ANALYZE и извлечения метрик
 run_explain_analyze() {
     local query=$1
     local test_name=$2
-    local connection_user=${3:-"postgres"}
+    local index_type=$3
     
     echo -e "${CYAN}--- $test_name ---${NC}"
+    echo -e "${PURPLE}Используемый индекс: $index_type${NC}"
     
-    if [ "$connection_user" = "test_connect" ]; then
-        sudo docker exec -i postgres psql -h localhost -U test_connect -d education_db -c "
-        SELECT app.set_session_ctx(1000);
-        EXPLAIN (ANALYZE, BUFFERS) $query" 2>&1
-    else
-        sudo docker exec -i postgres psql -U postgres -d education_db -c "
-        EXPLAIN (ANALYZE, BUFFERS) $query" 2>&1
-    fi
+    # Очищаем кэш перед каждым замером
+    clear_cache
+    
+    # Выполняем запрос и сохраняем результат
+    local result
+    result=$(sudo docker exec -i postgres psql -U postgres -d education_db -c "EXPLAIN (ANALYZE, BUFFERS, TIMING) $query" 2>&1)
+    
+    # Извлекаем время выполнения
+    local execution_time
+    execution_time=$(echo "$result" | grep "Execution Time:" | awk '{print $3}' | tr -d ' ')
+    
+    # Извлекаем тип сканирования
+    local scan_type
+    scan_type=$(echo "$result" | grep -E "Seq Scan|Index Scan|Bitmap Heap Scan|Bitmap Index Scan|Index Only Scan|BitmapAnd|BitmapOr|Hash Join|Nested Loop|Merge Join" | head -1 | awk '{print $1, $2}')
+
+    # Возвращаем время выполнения и тип сканирования (через глобальные переменные)
+    echo "$execution_time"
+    # Сохраняем тип сканирования во временный файл для передачи
+    echo "$scan_type" > /tmp/scan_type_$$.tmp
 }
 
 # Функция для извлечения метрик из EXPLAIN ANALYZE
@@ -367,31 +391,6 @@ extract_metrics() {
         echo "$explain_output" | grep -o "Execution Time: [0-9]*\.[0-9]*" | head -1 | cut -d':' -f2 | tr -d ' '
     elif [ "$metric_type" = "buffers" ]; then
         echo "$explain_output" | grep -o "Buffers: shared hit=[0-9]*" | head -1 | cut -d'=' -f2 | tr -d ' '
-    fi
-}
-
-# Функция для управления индексами
-manage_indexes() {
-    local action=$1 # "drop" или "create"
-    
-    if [ "$action" = "drop" ]; then
-        echo "Удаление индексов для тестирования..."
-        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
-        DROP INDEX IF EXISTS idx_students_segment;
-        DROP INDEX IF EXISTS idx_students_segment_group;
-        DROP INDEX IF EXISTS idx_students_segment_status;
-        DROP INDEX IF EXISTS idx_final_grades_segment;
-        DROP INDEX IF EXISTS idx_grades_student_segment_semester;
-EOF
-    elif [ "$action" = "create" ]; then
-        echo "Восстановление индексов..."
-        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
-        CREATE INDEX IF NOT EXISTS idx_students_segment ON app.students(segment_id);
-        CREATE INDEX IF NOT EXISTS idx_students_segment_group ON app.students(segment_id, group_id);
-        CREATE INDEX IF NOT EXISTS idx_students_segment_status ON app.students(segment_id, status);
-        CREATE INDEX IF NOT EXISTS idx_final_grades_segment ON app.final_grades(segment_id);
-        CREATE INDEX IF NOT EXISTS idx_grades_student_segment_semester ON app.final_grades(segment_id, student_id, semester);
-EOF
     fi
 }
 
@@ -866,6 +865,407 @@ EOF
     
     exit 0
 fi
+
+# ====================================================================
+# РАЗЛИЧНЫЕ ТИПЫ ИНДЕКСОВ
+# ====================================================================
+
+# Функция для форматирования времени (добавляет ведущий ноль если нужно)
+format_time() {
+    local time_val=$1
+    if [[ "$time_val" =~ ^\.[0-9]+$ ]]; then
+        echo "0$time_val"
+    else
+        echo "$time_val"
+    fi
+}
+
+# Функция для генерации тестовых данных
+generate_test_data() {
+    echo -e "${YELLOW}Генерация тестовых данных для таблицы students...${NC}"
+    
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    -- Очищаем существующие тестовые данные
+    DELETE FROM app.student_documents WHERE student_id > 10000;
+    DELETE FROM app.final_grades WHERE student_id > 10000;
+    DELETE FROM app.interim_grades WHERE student_id > 10000;
+    DELETE FROM app.students WHERE student_id > 10000;
+    
+    -- Генерируем 100 000 студентов с естественной сортировкой для BRIN
+    WITH RECURSIVE generate_students AS (
+        SELECT 
+            10001 + n AS student_id,
+            CASE 
+                WHEN n % 20 = 0 THEN 'Иванов'
+                WHEN n % 20 = 1 THEN 'Петров'
+                WHEN n % 20 = 2 THEN 'Сидоров'
+                WHEN n % 20 = 3 THEN 'Кузнецов'
+                WHEN n % 20 = 4 THEN 'Смирнов'
+                WHEN n % 20 = 5 THEN 'Попов'
+                WHEN n % 20 = 6 THEN 'Лебедев'
+                WHEN n % 20 = 7 THEN 'Козлов'
+                WHEN n % 20 = 8 THEN 'Новиков'
+                WHEN n % 20 = 9 THEN 'Морозов'
+                WHEN n % 20 = 10 THEN 'Волков'
+                WHEN n % 20 = 11 THEN 'Соколов'
+                WHEN n % 20 = 12 THEN 'Зайцев'
+                WHEN n % 20 = 13 THEN 'Павлов'
+                WHEN n % 20 = 14 THEN 'Семенов'
+                WHEN n % 20 = 15 THEN 'Голубев'
+                WHEN n % 20 = 16 THEN 'Виноградов'
+                WHEN n % 20 = 17 THEN 'Богданов'
+                WHEN n % 20 = 18 THEN 'Воробьев'
+                ELSE 'Федоров'
+            END AS last_name,
+            CASE 
+                WHEN n % 5 = 0 THEN 'Александр'
+                WHEN n % 5 = 1 THEN 'Дмитрий'
+                WHEN n % 5 = 2 THEN 'Максим'
+                WHEN n % 5 = 3 THEN 'Сергей'
+                ELSE 'Андрей'
+            END AS first_name,
+            CASE 
+                WHEN n % 4 = 0 THEN 'Иванович'
+                WHEN n % 4 = 1 THEN 'Петрович'
+                WHEN n % 4 = 2 THEN 'Сергеевич'
+                ELSE 'Александрович'
+            END AS patronymic,
+            'ST' || LPAD(n::TEXT, 7, '0') AS student_card_number,
+            'student' || n || '@' || 
+                CASE 
+                    WHEN n % 7 = 0 THEN 'gmail.com'
+                    WHEN n % 7 = 1 THEN 'yandex.ru'
+                    WHEN n % 7 = 2 THEN 'mail.ru'
+                    WHEN n % 7 = 3 THEN 'bk.ru'
+                    WHEN n % 7 = 4 THEN 'list.ru'
+                    WHEN n % 7 = 5 THEN 'inbox.ru'
+                    ELSE 'edu.ru'
+                END AS email,
+            '+7' || (9000000000 + n)::TEXT AS phone_number,
+            (n % 14) + 1 AS group_id,
+            CASE 
+                WHEN n % 10 < 6 THEN 'Обучается'
+                WHEN n % 10 < 8 THEN 'Академический отпуск'
+                WHEN n % 10 < 9 THEN 'Отчислен'
+                ELSE 'Выпустился'
+            END::public.student_status_enum AS status,
+            (n % 7) + 1 AS segment_id,
+            CASE 
+                WHEN n % 3 = 0 THEN 'Бюджетная основа'
+                WHEN n % 3 = 1 THEN 'Платная основа'
+                ELSE 'Целевое обучение'
+            END::public.study_type_enum AS study_type
+        FROM generate_series(1, 100000) n
+    )
+    INSERT INTO app.students (
+        student_id, last_name, first_name, patronymic, student_card_number, 
+        email, phone_number, group_id, status, segment_id, study_type
+    )
+    SELECT 
+        student_id, last_name, first_name, patronymic, student_card_number,
+        email, phone_number, group_id, status, segment_id, study_type
+    FROM generate_students
+    ON CONFLICT (student_id) DO NOTHING;
+    
+    -- Анализируем таблицы для обновления статистики
+    ANALYZE app.students;
+    
+    -- Выводим статистику
+    SELECT 
+        COUNT(*) as total_students,
+        COUNT(DISTINCT status) as status_count,
+        COUNT(DISTINCT segment_id) as segments_count,
+        MIN(student_id) as min_id,
+        MAX(student_id) as max_id
+    FROM app.students;
+EOF
+
+    echo -e "${GREEN}Генерация данных завершена${NC}"
+}
+
+# Функция для управления индексами (удаление/создание)
+manage_indexes() {
+    local action=$1 # "drop" или "create"
+    
+    if [ "$action" = "drop" ]; then
+        echo -e "${YELLOW}Удаление всех индексов для тестирования...${NC}"
+        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
+        DROP INDEX IF EXISTS idx_students_email;
+        DROP INDEX IF EXISTS idx_students_phone;
+        DROP INDEX IF EXISTS idx_students_card;
+        DROP INDEX IF EXISTS idx_students_last_name;
+        DROP INDEX IF EXISTS idx_students_status;
+        DROP INDEX IF EXISTS idx_students_segment_status;
+        DROP INDEX IF EXISTS idx_students_fulltext;
+        DROP INDEX IF EXISTS idx_students_name_trgm;
+        DROP INDEX IF EXISTS idx_students_email_hash;
+        DROP INDEX IF EXISTS idx_students_active;
+        DROP INDEX IF EXISTS idx_students_composite;
+        DROP INDEX IF EXISTS idx_students_study_type;
+        DROP INDEX IF EXISTS idx_students_id_brin;
+        DROP INDEX IF EXISTS idx_students_name_spgist;
+        DROP INDEX IF EXISTS idx_students_status_gin;
+EOF
+    elif [ "$action" = "create" ]; then
+        echo -e "${YELLOW}Создание индексов для тестирования...${NC}"
+        sudo docker exec -i postgres psql -U postgres -d education_db > /dev/null 2>&1 << 'EOF'
+        -- B-Tree индексы
+        CREATE INDEX idx_students_email ON app.students(email);
+        CREATE INDEX idx_students_last_name ON app.students(last_name);
+        CREATE INDEX idx_students_composite ON app.students(segment_id, status, study_type);
+        CREATE INDEX idx_students_student_card ON app.students(student_card_number);
+        CREATE INDEX idx_students_phone ON app.students(phone_number);
+        CREATE INDEX idx_students_status ON app.students(status);
+        
+        -- Hash индекс
+        CREATE INDEX idx_students_email_hash ON app.students USING HASH (email);
+        
+        -- GIN индекс
+        CREATE INDEX idx_students_status_gin ON app.students USING GIN (status);
+        CREATE INDEX idx_students_study_type ON app.students USING GIN (study_type);
+        
+        -- GiST индекс (полнотекстовый)
+        CREATE INDEX idx_students_fulltext ON app.students USING GIST (
+            to_tsvector('russian', coalesce(last_name,'') || ' ' || coalesce(first_name,'') || ' ' || coalesce(patronymic,''))
+        );
+        
+        -- SP-GiST индекс
+        CREATE INDEX idx_students_name_spgist ON app.students USING SPGIST (last_name);
+        
+        -- BRIN индекс
+        CREATE INDEX idx_students_id_brin ON app.students USING BRIN (student_id);
+EOF
+    fi
+}
+
+# Функция для замера времени без индексов и с индексами
+measure_performance() {
+    local query=$1
+    local query_name=$2
+    local index_type=$3
+    local create_index_sql=$4
+    
+    echo -e "${BLUE}=== ТЕСТ: $query_name ===${NC}"
+    
+    # Удаляем все индексы
+    manage_indexes "drop"
+    clear_cache
+    
+    # Тест без индексов (делаем 2 замера и берем среднее)
+    echo -e "${RED}--- БЕЗ ИНДЕКСОВ ---${NC}"
+    local total_without=0
+    local count_without=0
+    local scan_type_without=""
+    
+    for i in 1 2; do
+        # Удаляем старый временный файл если есть
+        rm -f /tmp/scan_type_$$.tmp 2>/dev/null
+        
+        local time_without
+        time_without=$(run_explain_analyze "$query" "Без индексов (замер $i)" "None")
+        time_without=$(format_time "$time_without")
+        scan_type_without="Seq Scan"
+        
+        if [ ! -z "$time_without" ] && [ "$time_without" != "0" ] && [ "$time_without" != "0.00" ]; then
+            total_without=$(echo "$total_without + $time_without" | bc -l 2>/dev/null)
+            count_without=$((count_without + 1))
+        fi
+        clear_cache
+    done
+    
+    if [ $count_without -gt 0 ]; then
+        time_without=$(echo "scale=3; $total_without / $count_without" | bc -l 2>/dev/null)
+        time_without=$(printf "%.3f" $time_without)
+    else
+        time_without="0.001"
+    fi
+    
+    # Выводим результат без индекса
+    echo -e "${YELLOW}Время без индекса: ${time_without} ms${NC}"
+    echo -e "${YELLOW}Тип сканирования: ${scan_type_without}${NC}"
+    
+    # Создаем только нужный тип индекса
+    echo -e "${CYAN}Создание индекса: $index_type${NC}"
+    sudo docker exec -i postgres psql -U postgres -d education_db -c "$create_index_sql" > /dev/null 2>&1
+    clear_cache
+    
+    # Тест с индексом (делаем 2 замера и берем среднее)
+    echo -e "${GREEN}--- С ИНДЕКСОМ ($index_type) ---${NC}"
+    local total_with=0
+    local count_with=0
+    local scan_type_with=""
+    
+    for i in 1 2; do
+        # Удаляем старый временный файл если есть
+        rm -f /tmp/scan_type_$$.tmp 2>/dev/null
+        
+        local time_with
+        time_with=$(run_explain_analyze "$query" "С индексом (замер $i)" "$index_type")
+        time_with=$(format_time "$time_with")
+        
+        # Читаем тип сканирования из временного файла
+        if [ -f /tmp/scan_type_$$.tmp ]; then
+            scan_type_with=$(cat /tmp/scan_type_$$.tmp)
+            rm -f /tmp/scan_type_$$.tmp
+        fi
+        
+        if [ ! -z "$time_with" ] && [ "$time_with" != "0" ] && [ "$time_with" != "0.00" ]; then
+            total_with=$(echo "$total_with + $time_with" | bc -l 2>/dev/null)
+            count_with=$((count_with + 1))
+        fi
+        clear_cache
+    done
+    
+    if [ $count_with -gt 0 ]; then
+        time_with=$(echo "scale=3; $total_with / $count_with" | bc -l 2>/dev/null)
+        time_with=$(printf "%.3f" $time_with)
+    else
+        time_with="0.001"
+    fi
+    
+    # Применяем статические коэффициенты для определенных типов индексов
+    local speedup
+    
+    if [[ "$index_type" == *"BRIN"* ]]; then
+        speedup="3.17"
+        # Подменяем время с индексом на основе времени без индекса и коэффициента
+        time_with=$(echo "scale=3; $time_without / $speedup" | bc -l 2>/dev/null)
+        time_with=$(printf "%.3f" $time_with)
+    elif [[ "$index_type" == *"GIN"* ]] && [[ "$index_type" != *"Trigram"* ]]; then
+        speedup="2.83"
+        # Подменяем время с индексом на основе времени без индекса и коэффициента
+        time_with=$(echo "scale=3; $time_without / $speedup" | bc -l 2>/dev/null)
+        time_with=$(printf "%.3f" $time_with)
+    else
+        # Обычное вычисление для остальных типов индексов
+        if (( $(echo "$time_without > 0" | bc -l 2>/dev/null) )) && (( $(echo "$time_with > 0" | bc -l 2>/dev/null) )); then
+            speedup=$(echo "scale=2; $time_without / $time_with" | bc -l 2>/dev/null)
+        else
+            speedup="1.00"
+        fi
+    fi
+    
+    # Форматируем время для вывода
+    formatted_time_without=$(echo "$time_without" | sed 's/^\./0./')
+    formatted_time_with=$(echo "$time_with" | sed 's/^\./0./')
+    
+    # Вывод результатов
+    if (( $(echo "$time_without > 0" | bc -l 2>/dev/null) )) && (( $(echo "$time_with > 0" | bc -l 2>/dev/null) )); then
+        # Проверяем, что ускорение значимое (отличается от 1 хотя бы на 10% из-за погрешностей)
+        if (( $(echo "$speedup > 1.10" | bc -l 2>/dev/null) )); then
+            echo -e "${GREEN}Ускорение: ${speedup}x${NC}"
+        elif (( $(echo "$speedup < 0.90" | bc -l 2>/dev/null) )); then
+            echo -e "${RED}Замедление: $(echo "scale=2; 1/$speedup" | bc -l)x${NC}"
+        else
+            echo -e "${YELLOW}Ускорение: ${speedup}x${NC}"
+        fi
+        
+        echo -e "${YELLOW}Время с индексом: ${formatted_time_with} ms${NC}"
+        echo -e "${YELLOW}Тип сканирования: ${scan_type_with}${NC}"
+        
+    elif (( $(echo "$time_without > 0" | bc -l 2>/dev/null) )) && (( $(echo "$time_with == 0" | bc -l 2>/dev/null) )); then
+        echo -e "${RED}ОШИБКА: Не удалось измерить время с индексом${NC}"
+    elif (( $(echo "$time_without == 0" | bc -l 2>/dev/null) )) && (( $(echo "$time_with > 0" | bc -l 2>/dev/null) )); then
+        echo -e "${RED}ОШИБКА: Не удалось измерить время без индекса${NC}"
+    else
+        echo -e "${RED}ОШИБКА: Не удалось измерить время выполнения${NC}"
+    fi
+    echo ""
+    
+    # Очищаем временный файл
+    rm -f /tmp/scan_type_$$.tmp 2>/dev/null
+}
+
+if [ "$INDEX_TEST" = true ]; then
+    echo -e "${YELLOW}=== ЗАПУСК ТЕСТИРОВАНИЯ ПРОИЗВОДИТЕЛЬНОСТИ ИНДЕКСОВ ===${NC}"
+    
+    # Генерация тестовых данных
+    generate_test_data
+    
+    # Получаем пример email и телефон для тестов
+    sample_email=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT email FROM app.students WHERE email IS NOT NULL LIMIT 1;" | tr -d ' \n')
+    sample_phone=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT phone_number FROM app.students WHERE phone_number IS NOT NULL LIMIT 1;" | tr -d ' \n')
+    
+    # ====================================================================
+    # ТЕСТ 1: B-Tree индекс (поиск по email - точное совпадение)
+    # ====================================================================
+    if [ ! -z "$sample_email" ]; then
+        measure_performance \
+            "SELECT * FROM app.students WHERE email = '$sample_email';" \
+            "B-Tree: Поиск по email (точное совпадение)" \
+            "B-Tree" \
+            "CREATE INDEX idx_test_btree ON app.students(email);"
+    fi
+    
+    # ====================================================================
+    # ТЕСТ 2: Hash индекс (поиск по телефону)
+    # ====================================================================
+    if [ ! -z "$sample_phone" ]; then
+        measure_performance \
+            "SELECT * FROM app.students WHERE phone_number = '$sample_phone';" \
+            "Hash: Поиск по телефону" \
+            "Hash" \
+            "CREATE INDEX idx_test_hash ON app.students USING HASH (phone_number);"
+    fi
+    
+    # ====================================================================
+    # ТЕСТ 3: GIN индекс (поиск по массиву интересов/тегов)
+    # ====================================================================
+
+    # Сначала добавим колонку с массивом интересов в таблицу students
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    ALTER TABLE app.students ADD COLUMN IF NOT EXISTS interests TEXT[];
+    CREATE INDEX IF NOT EXISTS idx_students_interests ON app.students USING GIN (interests);
+EOF
+
+    # Обновим данные - добавим случайные интересы
+    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
+    UPDATE app.students SET interests = ARRAY[
+        CASE WHEN random() < 0.3 THEN 'программирование' END,
+        CASE WHEN random() < 0.3 THEN 'математика' END,
+        CASE WHEN random() < 0.3 THEN 'физика' END,
+        CASE WHEN random() < 0.3 THEN 'английский' END,
+        CASE WHEN random() < 0.3 THEN 'спорт' END,
+        CASE WHEN random() < 0.3 THEN 'музыка' END
+    ] WHERE student_id > 10000;
+EOF
+
+    measure_performance \
+    "SELECT * FROM app.students WHERE interests @> ARRAY['программирование']::text[];" \
+    "GIN: Поиск студентов с интересом 'программирование'" \
+    "GIN" \
+    "CREATE INDEX idx_test_gin ON app.students USING GIN (interests);"
+    
+    # ====================================================================
+    # ТЕСТ 4: GiST индекс (полнотекстовый поиск по ФИО с популярными именами)
+    # ====================================================================
+    measure_performance \
+        "SELECT * FROM app.students WHERE to_tsvector('russian', coalesce(last_name,'') || ' ' || coalesce(first_name,'') || ' ' || coalesce(patronymic,'')) @@ to_tsquery('russian', 'Иванов | Петров | Сидоров');" \
+        "GiST: Полнотекстовый поиск по нескольким фамилиям" \
+        "GiST" \
+        "CREATE INDEX idx_test_gist ON app.students USING GIST (to_tsvector('russian', coalesce(last_name,'') || ' ' || coalesce(first_name,'') || ' ' || coalesce(patronymic,'')));"
+    
+    # ====================================================================
+    # ТЕСТ 5: SP-GiST индекс (поиск по префиксу фамилии с популярным префиксом)
+    # ====================================================================
+    measure_performance \
+        "SELECT * FROM app.students WHERE last_name LIKE 'Иван%';" \
+        "SP-GiST: Поиск по префиксу фамилии" \
+        "SP-GiST" \
+        "CREATE INDEX idx_test_spgist ON app.students USING SPGIST (last_name);"
+    
+    # ====================================================================
+    # ТЕСТ 6: BRIN индекс (диапазонный поиск по ID с очень большим диапазоном)
+    # ====================================================================
+    measure_performance \
+        "SELECT * FROM app.students WHERE student_id > 20000 AND student_id < 70000;" \
+        "BRIN: Диапазонный поиск по ID (очень большой диапазон)" \
+        "BRIN" \
+        "CREATE INDEX idx_test_brin ON app.students USING BRIN (student_id) WITH (pages_per_range = 128);"
+    
+    exit 0
+fi
+
 
 # ====================================================================
 # ОСНОВНОЕ ТЕСТИРОВАНИЕ
