@@ -178,7 +178,7 @@ CREATE TABLE app.students (
     first_name VARCHAR(50) NOT NULL,
     patronymic VARCHAR(50),
     student_card_number VARCHAR(20) NOT NULL UNIQUE,
-    email VARCHAR(255) UNIQUE,
+    email VARCHAR(255),
     phone_number VARCHAR(20),
     group_id INT NOT NULL,
     status student_status_enum NOT NULL DEFAULT 'Обучается',
@@ -2147,6 +2147,11 @@ CREATE TRIGGER tr_teachers_audit
     FOR EACH ROW
     EXECUTE FUNCTION audit.log_row_change();
 
+CREATE TRIGGER tr_final_grades_audit
+    AFTER UPDATE OR DELETE ON app.final_grades
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.log_row_change();
+
 GRANT SELECT ON audit.row_change_log TO auditor, security_admin;
 
 
@@ -3506,3 +3511,103 @@ ORDER BY monthly_payments ASC;
 
 -- Права на просмотр
 GRANT SELECT ON app.discount_effectiveness TO app_reader, auditor;
+
+-- ТРИГГЕРЫ ЛР 2 СЕМ 6
+
+-- Триггер для проверки уникальности email
+CREATE OR REPLACE FUNCTION app.check_email_uniqueness()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM app.students 
+        WHERE email = NEW.email 
+        AND student_id != COALESCE(NEW.student_id, -1)
+        AND segment_id = NEW.segment_id
+    ) THEN
+        RAISE EXCEPTION 'Студент с email % уже существует в данном сегменте', NEW.email;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_student_email_unique
+    BEFORE INSERT OR UPDATE OF email ON app.students
+    FOR EACH ROW
+    EXECUTE FUNCTION app.check_email_uniqueness();
+
+-- связанные таблицы!!!!!!!!!!!!!
+
+-- Триггер для мониторинга массовых удалений
+CREATE OR REPLACE FUNCTION app.prevent_mass_deletion()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_deletions_last_minute INT;
+    v_current_user TEXT := session_user;
+BEGIN
+    -- Проверяем количество удалений за последнюю минуту текущим пользователем
+    SELECT COUNT(*) INTO v_deletions_last_minute
+    FROM audit.row_change_log
+    WHERE user_name = v_current_user
+      AND operation = 'D'
+      AND change_time > NOW() - INTERVAL '1 minute';
+    
+    -- Если больше 10 удалений за минуту - блокируем
+    IF v_deletions_last_minute >= 10 THEN
+        RAISE EXCEPTION 'Обнаружена подозрительная активность: более 10 удалений за минуту. Операция заблокирована.';
+    END IF;
+    
+    RETURN OLD;
+END;
+$$;
+
+-- Добавляем триггеры на критичные таблицы
+CREATE TRIGGER trg_prevent_mass_deletion_students
+    BEFORE DELETE ON app.students
+    FOR EACH ROW
+    EXECUTE FUNCTION app.prevent_mass_deletion();
+
+CREATE TRIGGER trg_prevent_mass_deletion_grades
+    BEFORE DELETE ON app.final_grades
+    FOR EACH ROW
+    EXECUTE FUNCTION app.prevent_mass_deletion();
+
+CREATE TRIGGER trg_prevent_mass_deletion_documents
+    BEFORE DELETE ON app.student_documents
+    FOR EACH ROW
+    EXECUTE FUNCTION app.prevent_mass_deletion();
+
+-- Функция для автоматической установки текущей даты
+CREATE OR REPLACE FUNCTION app.set_grade_date()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    -- Если дата не указана или NULL, устанавливаем текущую дату
+    IF NEW.grade_date IS NULL THEN
+        NEW.grade_date := CURRENT_DATE;
+    END IF;
+    
+    -- Дополнительно: если дата в будущем - тоже заменяем на текущую (опционально)
+    IF NEW.grade_date > CURRENT_DATE THEN
+        NEW.grade_date := CURRENT_DATE;
+        RAISE NOTICE 'Дата оценки не может быть в будущем. Установлена текущая дата.';
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_final_grades_set_date
+    BEFORE INSERT ON app.final_grades
+    FOR EACH ROW
+    EXECUTE FUNCTION app.set_grade_date();
+
+-- Триггер для контроля изменения паролей пользователей БД
