@@ -3540,6 +3540,361 @@ CREATE TRIGGER trg_student_email_unique
     EXECUTE FUNCTION app.check_email_uniqueness();
 
 -- связанные таблицы!!!!!!!!!!!!!
+-- ===========================================================================
+-- ТАБЛИЦА ДЛЯ ХРАНЕНИЯ СКИДОК СТУДЕНТОВ-ПЛАТНИКОВ
+-- ===========================================================================
+
+-- Таблица для хранения текущих скидок студентов
+CREATE TABLE IF NOT EXISTS app.student_discounts (
+    discount_id SERIAL PRIMARY KEY,
+    student_id INT NOT NULL REFERENCES app.students(student_id) ON DELETE CASCADE,
+    current_discount_percent INT NOT NULL DEFAULT 0,
+    previous_discount_percent INT DEFAULT 0,
+    last_calculated_gpa DECIMAL(3,2) DEFAULT 0.00,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(100) DEFAULT session_user,
+    semester INT NOT NULL DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::INT * 2,
+    UNIQUE(student_id, semester)
+);
+
+-- Индекс для быстрого поиска
+CREATE INDEX IF NOT EXISTS idx_student_discounts_student ON app.student_discounts(student_id, semester);
+CREATE INDEX IF NOT EXISTS idx_student_discounts_updated ON app.student_discounts(last_updated);
+
+-- Комментарии
+COMMENT ON TABLE app.student_discounts IS 'Текущие скидки студентов-платников на обучение';
+COMMENT ON COLUMN app.student_discounts.current_discount_percent IS 'Текущий процент скидки';
+COMMENT ON COLUMN app.student_discounts.previous_discount_percent IS 'Предыдущий процент скидки (для отслеживания изменений)';
+COMMENT ON COLUMN app.student_discounts.last_calculated_gpa IS 'GPA, на основе которого рассчитана скидка';
+
+-- ===========================================================================
+-- ФУНКЦИЯ ДЛЯ РАСЧЕТА СКИДКИ НА ОСНОВЕ GPA
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.calculate_discount_by_gpa(
+    p_gpa DECIMAL(3,2)
+) RETURNS INT
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+    -- Правила расчета скидки на основе GPA
+    -- Можно настроить под требования бизнеса
+    IF p_gpa >= 4.8 THEN
+        RETURN 25;  -- Отличники: 25% скидка
+    ELSIF p_gpa >= 4.5 THEN
+        RETURN 20;  -- Хорошисты с высокими баллами: 20%
+    ELSIF p_gpa >= 4.0 THEN
+        RETURN 15;  -- Хорошисты: 15%
+    ELSIF p_gpa >= 3.5 THEN
+        RETURN 10;  -- Средний уровень: 10%
+    ELSIF p_gpa >= 3.0 THEN
+        RETURN 5;   -- Удовлетворительно: 5%
+    ELSE
+        RETURN 0;   -- Ниже среднего: без скидки
+    END IF;
+END;
+$$;
+
+-- ===========================================================================
+-- ФУНКЦИЯ ДЛЯ ОБНОВЛЕНИЯ СКИДКИ СТУДЕНТА
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.update_student_discount_from_grades(
+    p_student_id INT,
+    p_semester INT DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::INT * 2
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_current_gpa DECIMAL(3,2);
+    v_new_discount INT;
+    v_old_discount INT;
+    v_study_type public.study_type_enum;
+    v_status public.student_status_enum;
+    v_segment_id INT;
+BEGIN
+    -- Проверяем, что студент существует и имеет право на скидку
+    SELECT study_type, status, segment_id INTO v_study_type, v_status, v_segment_id
+    FROM app.students WHERE student_id = p_student_id;
+    
+    IF NOT FOUND THEN
+        RAISE NOTICE 'Студент с ID % не найден', p_student_id;
+        RETURN FALSE;
+    END IF;
+    
+    -- Только студенты на платной основе имеют право на скидку
+    IF v_study_type != 'Платная основа' THEN
+        RAISE NOTICE 'Студент ID % не на платной основе, скидка не применяется', p_student_id;
+        RETURN FALSE;
+    END IF;
+    
+    -- Активные студенты (обучающиеся или в академе) могут получать скидку
+    IF v_status NOT IN ('Обучается', 'Академический отпуск', 'VIP') THEN
+        RAISE NOTICE 'Студент ID % имеет статус "%", скидка не применяется', p_student_id, v_status;
+        RETURN FALSE;
+    END IF;
+    
+    -- Получаем текущий GPA студента (вычисляем по всем оценкам)
+    SELECT COALESCE(
+        ROUND(AVG(
+            CASE 
+                WHEN fg.final_grade_value = '5' OR fg.final_grade_value = 'Зачет' THEN 5.0
+                WHEN fg.final_grade_value = '4' THEN 4.0
+                WHEN fg.final_grade_value = '3' THEN 3.0
+                WHEN fg.final_grade_value = '2' OR fg.final_grade_value = 'Незачет' THEN 2.0
+                ELSE NULL
+            END
+        ), 2), 0.00) INTO v_current_gpa
+    FROM app.final_grades fg
+    WHERE fg.student_id = p_student_id;
+    
+    -- Рассчитываем новую скидку на основе GPA
+    v_new_discount := app.calculate_discount_by_gpa(v_current_gpa);
+    
+    -- Получаем старую скидку, если есть
+    SELECT current_discount_percent INTO v_old_discount
+    FROM app.student_discounts
+    WHERE student_id = p_student_id AND semester = p_semester;
+    
+    v_old_discount := COALESCE(v_old_discount, 0);
+    
+    -- Вставляем или обновляем запись о скидке
+    INSERT INTO app.student_discounts (
+        student_id,
+        current_discount_percent,
+        previous_discount_percent,
+        last_calculated_gpa,
+        last_updated,
+        updated_by,
+        semester
+    ) VALUES (
+        p_student_id,
+        v_new_discount,
+        v_old_discount,
+        v_current_gpa,
+        CURRENT_TIMESTAMP,
+        session_user,
+        p_semester
+    )
+    ON CONFLICT (student_id, semester) DO UPDATE SET
+        current_discount_percent = EXCLUDED.current_discount_percent,
+        previous_discount_percent = CASE 
+            WHEN student_discounts.current_discount_percent != EXCLUDED.current_discount_percent 
+            THEN student_discounts.current_discount_percent
+            ELSE student_discounts.previous_discount_percent
+        END,
+        last_calculated_gpa = EXCLUDED.last_calculated_gpa,
+        last_updated = EXCLUDED.last_updated,
+        updated_by = EXCLUDED.updated_by;
+    
+    -- Логируем изменение скидки в audit
+    IF v_old_discount != v_new_discount THEN
+        INSERT INTO audit.function_calls (
+            function_name,
+            caller_role,
+            input_params,
+            success
+        ) VALUES (
+            'update_student_discount_from_grades',
+            session_user,
+            jsonb_build_object(
+                'student_id', p_student_id,
+                'semester', p_semester,
+                'old_discount', v_old_discount,
+                'new_discount', v_new_discount,
+                'gpa', v_current_gpa,
+                'segment_id', v_segment_id
+            ),
+            true
+        );
+        
+        RAISE NOTICE 'Скидка студента ID % изменена с % на % (GPA: %)', 
+            p_student_id, v_old_discount, v_new_discount, v_current_gpa;
+    END IF;
+    
+    RETURN TRUE;
+END;
+$$;
+
+-- ===========================================================================
+-- ФУНКЦИЯ-ОБЕРТКА ДЛЯ ТРИГГЕРА (НОВАЯ)
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.trg_update_student_discount()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_current_semester INT;
+    v_affected_student_id INT;
+    v_operation_type TEXT;
+BEGIN
+    -- Определяем семестр (текущий)
+    v_current_semester := EXTRACT(YEAR FROM CURRENT_DATE)::INT * 2;
+    
+    -- Определяем ID студента в зависимости от операции
+    IF TG_OP = 'DELETE' THEN
+        v_affected_student_id := OLD.student_id;
+        v_operation_type := 'DELETE';
+    ELSE
+        v_affected_student_id := NEW.student_id;
+        v_operation_type := TG_OP;
+    END IF;
+    
+    -- Обновляем скидку студента
+    PERFORM app.update_student_discount_from_grades(
+        v_affected_student_id, 
+        v_current_semester
+    );
+    
+    -- Возвращаем соответствующую запись
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    ELSE
+        RETURN NEW;
+    END IF;
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем ошибку, но не блокируем основную операцию
+        INSERT INTO audit.function_calls (
+            function_name,
+            caller_role,
+            input_params,
+            success
+        ) VALUES (
+            'trg_update_student_discount',
+            session_user,
+            jsonb_build_object(
+                'error', SQLERRM,
+                'student_id', v_affected_student_id,
+                'operation', v_operation_type
+            ),
+            false
+        );
+        -- Не прерываем транзакцию, просто логируем ошибку
+        RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+-- ===========================================================================
+-- ТРИГГЕРЫ НА ТАБЛИЦУ final_grades
+-- ===========================================================================
+
+-- Удаляем старые триггеры, если они существуют (чтобы избежать конфликтов)
+DROP TRIGGER IF EXISTS trg_final_grades_discount_update ON app.final_grades;
+DROP TRIGGER IF EXISTS trg_final_grades_discount_update_delete ON app.final_grades;
+
+-- Триггер на INSERT и UPDATE
+CREATE TRIGGER trg_final_grades_discount_update
+    AFTER INSERT OR UPDATE OF final_grade_value ON app.final_grades
+    FOR EACH ROW
+    EXECUTE FUNCTION app.trg_update_student_discount();
+
+-- Триггер на DELETE
+CREATE TRIGGER trg_final_grades_discount_update_delete
+    AFTER DELETE ON app.final_grades
+    FOR EACH ROW
+    EXECUTE FUNCTION app.trg_update_student_discount();
+
+-- ===========================================================================
+-- ПРЕДСТАВЛЕНИЕ ДЛЯ ПРОСМОТРА СКИДОК
+-- ===========================================================================
+
+CREATE OR REPLACE VIEW app.student_discounts_view AS
+SELECT 
+    s.student_id,
+    s.last_name || ' ' || s.first_name || COALESCE(' ' || s.patronymic, '') AS student_name,
+    sg.group_name,
+    f.faculty_name,
+    ei.institution_name,
+    s.student_card_number,
+    s.email,
+    s.gpa,
+    s.status,
+    sd.current_discount_percent AS discount_percent,
+    sd.previous_discount_percent AS previous_discount,
+    sd.last_calculated_gpa,
+    sd.last_updated,
+    sd.updated_by,
+    sd.semester,
+    CASE 
+        WHEN sd.current_discount_percent >= 20 THEN 'Высокая скидка'
+        WHEN sd.current_discount_percent >= 10 THEN 'Средняя скидка'
+        WHEN sd.current_discount_percent > 0 THEN 'Низкая скидка'
+        ELSE 'Без скидки'
+    END AS discount_category
+FROM app.students s
+JOIN app.study_groups sg ON s.group_id = sg.group_id
+JOIN app.faculties f ON sg.faculty_id = f.faculty_id
+JOIN app.educational_institutions ei ON f.institution_id = ei.institution_id
+LEFT JOIN app.student_discounts sd ON s.student_id = sd.student_id 
+    AND sd.semester = EXTRACT(YEAR FROM CURRENT_DATE)::INT * 2
+WHERE s.study_type = 'Платная основа'
+ORDER BY sd.current_discount_percent DESC NULLS LAST, s.gpa DESC;
+
+-- ===========================================================================
+-- ФУНКЦИЯ ДЛЯ ПЕРВОНАЧАЛЬНОГО ЗАПОЛНЕНИЯ СКИДОК
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.initialize_student_discounts(
+    p_semester INT DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::INT * 2
+) RETURNS TABLE(processed_count INT, execution_time TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_count INT := 0;
+    v_student RECORD;
+    v_start_time TIMESTAMP;
+    v_end_time TIMESTAMP;
+    v_execution_seconds NUMERIC;
+BEGIN
+    v_start_time := clock_timestamp();
+    
+    -- Очищаем старые записи для указанного семестра
+    DELETE FROM app.student_discounts WHERE semester = p_semester;
+    
+    -- Обрабатываем всех студентов-платников
+    FOR v_student IN 
+        SELECT student_id FROM app.students 
+        WHERE study_type = 'Платная основа'
+    LOOP
+        IF app.update_student_discount_from_grades(v_student.student_id, p_semester) THEN
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+    
+    v_end_time := clock_timestamp();
+    v_execution_seconds := EXTRACT(EPOCH FROM (v_end_time - v_start_time));
+    
+    RETURN QUERY SELECT 
+        v_count,
+        ROUND(v_execution_seconds, 2)::TEXT || ' сек.';
+END;
+$$;
+
+-- ===========================================================================
+-- ПРАВА ДОСТУПА
+-- ===========================================================================
+
+GRANT SELECT ON app.student_discounts_view TO app_reader, app_writer, auditor;
+GRANT SELECT, INSERT, UPDATE ON app.student_discounts TO app_writer, dml_admin;
+GRANT USAGE ON SEQUENCE app.student_discounts_discount_id_seq TO app_writer, dml_admin;
+
+GRANT EXECUTE ON FUNCTION app.calculate_discount_by_gpa(DECIMAL) TO app_reader, app_writer;
+GRANT EXECUTE ON FUNCTION app.update_student_discount_from_grades(INT, INT) TO app_writer, dml_admin;
+GRANT EXECUTE ON FUNCTION app.initialize_student_discounts(INT) TO dml_admin, app_owner;
+
+-- ===========================================================================
+-- ИНИЦИАЛИЗАЦИЯ (ЗАПОЛНЕНИЕ НАЧАЛЬНЫМИ ДАННЫМИ)
+-- ===========================================================================
+
+-- Заполняем скидки для всех студентов-платников
+SELECT app.initialize_student_discounts();
 
 -- Триггер для мониторинга массовых удалений
 CREATE OR REPLACE FUNCTION app.prevent_mass_deletion()
