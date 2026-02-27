@@ -3966,3 +3966,418 @@ CREATE TRIGGER trg_final_grades_set_date
     EXECUTE FUNCTION app.set_grade_date();
 
 -- Триггер для контроля изменения паролей пользователей БД
+-- ===========================================================================
+-- ТАБЛИЦА СОТРУДНИКОВ ДЛЯ ХРАНЕНИЯ ЛОГИНОВ И ПАРОЛЕЙ
+-- ===========================================================================
+
+-- Создаем таблицу сотрудников с минимальным набором полей
+CREATE TABLE IF NOT EXISTS app.employees (
+    employee_id SERIAL PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name VARCHAR(200),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(100) DEFAULT session_user
+);
+
+-- Индекс для быстрого поиска по логину
+CREATE INDEX IF NOT EXISTS idx_employees_username ON app.employees(username);
+
+-- Комментарии
+COMMENT ON TABLE app.employees IS 'Сотрудники системы (логины и пароли)';
+COMMENT ON COLUMN app.employees.username IS 'Логин сотрудника (соответствует роли в БД)';
+COMMENT ON COLUMN app.employees.password_hash IS 'Хеш пароля сотрудника';
+
+-- ===========================================================================
+-- ТАБЛИЦА ДЛЯ ВРЕМЕННЫХ РАЗРЕШЕНИЙ НА СМЕНУ ПАРОЛЯ
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS app.password_change_allowance (
+    allowance_id SERIAL PRIMARY KEY,
+    username VARCHAR(100) NOT NULL,
+    allowed_by VARCHAR(100) NOT NULL,
+    allowed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    is_used BOOLEAN DEFAULT FALSE,
+    UNIQUE(username)
+);
+
+-- Индекс для быстрого поиска активных разрешений
+CREATE INDEX IF NOT EXISTS idx_password_change_allowance_active 
+ON app.password_change_allowance(username, expires_at) 
+WHERE is_used = FALSE;
+
+-- Комментарии
+COMMENT ON TABLE app.password_change_allowance IS 'Временные разрешения на смену пароля';
+COMMENT ON COLUMN app.password_change_allowance.username IS 'Логин сотрудника, которому разрешена смена пароля';
+COMMENT ON COLUMN app.password_change_allowance.allowed_by IS 'Кто выдал разрешение (security_admin)';
+COMMENT ON COLUMN app.password_change_allowance.expires_at IS 'Срок действия разрешения';
+COMMENT ON COLUMN app.password_change_allowance.is_used IS 'Использовано ли разрешение';
+
+-- ===========================================================================
+-- ФУНКЦИЯ ДЛЯ ВЫДАЧИ ВРЕМЕННОГО РАЗРЕШЕНИЯ НА СМЕНУ ПАРОЛЯ
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.grant_temp_password_change(
+    p_username VARCHAR(100),
+    p_minutes INTEGER DEFAULT 5
+) RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, audit'
+AS $$
+DECLARE
+    v_expires_at TIMESTAMP;
+    v_caller_role TEXT := session_user;
+BEGIN
+    -- Только security_admin может выдавать разрешения
+    IF NOT pg_has_role(v_caller_role, 'security_admin', 'MEMBER') THEN
+        RAISE EXCEPTION 'Только security_admin может выдавать разрешения на смену пароля';
+    END IF;
+    
+    -- Проверяем, что такой сотрудник существует
+    IF NOT EXISTS (SELECT 1 FROM app.employees WHERE username = p_username) THEN
+        RAISE EXCEPTION 'Сотрудник с логином % не найден', p_username;
+    END IF;
+    
+    -- Удаляем старые неиспользованные разрешения для этого пользователя
+    DELETE FROM app.password_change_allowance 
+    WHERE username = p_username AND is_used = FALSE;
+    
+    -- Вычисляем время истечения
+    v_expires_at := NOW() + (p_minutes || ' minutes')::INTERVAL;
+    
+    -- Выдаем новое разрешение (ВАЖНО: is_used = FALSE)
+    INSERT INTO app.password_change_allowance (
+        username, allowed_by, expires_at, is_used
+    ) VALUES (
+        p_username, v_caller_role, v_expires_at, FALSE
+    );
+    
+    -- Логируем выдачу разрешения
+    INSERT INTO audit.function_calls (
+        function_name, caller_role, input_params, success
+    ) VALUES (
+        'grant_temp_password_change',
+        v_caller_role,
+        jsonb_build_object(
+            'username', p_username,
+            'minutes', p_minutes,
+            'expires_at', v_expires_at
+        ),
+        true
+    );
+    
+    RETURN format('Разрешение на смену пароля выдано сотруднику %s до %s', 
+                  p_username, to_char(v_expires_at, 'DD.MM.YYYY HH24:MI:SS'));
+EXCEPTION
+    WHEN OTHERS THEN
+        INSERT INTO audit.function_calls (
+            function_name, caller_role, input_params, success
+        ) VALUES (
+            'grant_temp_password_change',
+            v_caller_role,
+            jsonb_build_object(
+                'username', p_username,
+                'minutes', p_minutes,
+                'error', SQLERRM
+            ),
+            false
+        );
+        RAISE;
+END;
+$$;
+
+-- ===========================================================================
+-- ФУНКЦИЯ ДЛЯ СМЕНЫ ПАРОЛЯ СОТРУДНИКА
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.change_employee_password(
+    p_username VARCHAR(100),
+    p_new_password TEXT
+) RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, audit, public'
+AS $$
+DECLARE
+    v_caller_role TEXT := session_user;
+    v_old_password_hash TEXT;
+    v_params JSONB;
+    v_allowance_id INTEGER;
+    v_has_allowance BOOLEAN;
+BEGIN
+    -- Формируем параметры для логирования
+    v_params := jsonb_build_object(
+        'target_username', p_username,
+        'changed_by', v_caller_role,
+        'attempt_time', NOW()
+    );
+
+    -- Проверяем существование сотрудника
+    SELECT password_hash INTO v_old_password_hash
+    FROM app.employees
+    WHERE username = p_username;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Сотрудник с логином % не найден', p_username;
+    END IF;
+
+    -- Проверка 1: Вызывающий пользователь - security_admin
+    IF pg_has_role(v_caller_role, 'security_admin', 'MEMBER') THEN
+        -- Разрешено, продолжаем
+        NULL;
+        -- Проверка 2: Есть активное разрешение в таблице allowance?
+    ELSE
+        -- Проверяем наличие НЕИСПОЛЬЗОВАННОГО разрешения
+        SELECT allowance_id INTO v_allowance_id
+        FROM app.password_change_allowance
+        WHERE username = p_username
+          AND expires_at > NOW()
+          AND is_used = FALSE
+        LIMIT 1;
+        
+        IF v_allowance_id IS NULL THEN
+            -- Нет разрешения - возвращаем сообщение об ошибке
+            RAISE EXCEPTION 'Смена пароля запрещена. Требуется роль security_admin или временное разрешение (выполните: SELECT app.grant_temp_password_change(''%''))', 
+                p_username;
+        END IF;
+    END IF;
+    
+    -- ВЫПОЛНЯЕМ СМЕНУ ПАРОЛЯ В ТАБЛИЦЕ employees
+    UPDATE app.employees 
+    SET password_hash = public.crypt(p_new_password, public.gen_salt('bf')),
+        updated_at = NOW(),
+        updated_by = v_caller_role
+    WHERE username = p_username;
+    
+    -- Если использовали временное разрешение - помечаем его как использованное
+    IF v_allowance_id IS NOT NULL THEN
+        UPDATE app.password_change_allowance
+        SET is_used = TRUE
+        WHERE allowance_id = v_allowance_id;
+    END IF;
+    
+    -- ВЫПОЛНЯЕМ ALTER USER (меняем пароль роли в БД)
+    BEGIN
+        EXECUTE format('ALTER ROLE %I WITH PASSWORD %L', p_username, p_new_password);
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Откатываем изменения в таблице employees
+            UPDATE app.employees 
+            SET password_hash = v_old_password_hash,
+                updated_at = NOW(),
+                updated_by = 'system_rollback'
+            WHERE username = p_username;
+            
+            -- Логируем ошибку
+            INSERT INTO audit.function_calls (
+                function_name, caller_role, input_params, success
+            ) VALUES (
+                'change_employee_password',
+                v_caller_role,
+                v_params || jsonb_build_object('error', SQLERRM, 'stage', 'ALTER_ROLE'),
+                false
+            );
+            
+            RAISE EXCEPTION 'Ошибка при смене пароля в БД: %', SQLERRM;
+    END;
+    
+    -- Логируем успешную смену пароля
+    INSERT INTO audit.function_calls (
+        function_name, caller_role, input_params, success
+    ) VALUES (
+        'change_employee_password',
+        v_caller_role,
+        v_params || jsonb_build_object('allowance_id', v_allowance_id),
+        true
+    );
+    
+    RETURN format('Пароль сотрудника %s успешно изменен', p_username);
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Логируем любую другую ошибку
+        INSERT INTO audit.function_calls (
+            function_name, caller_role, input_params, success
+        ) VALUES (
+            'change_employee_password',
+            v_caller_role,
+            v_params || jsonb_build_object('error', SQLERRM),
+            false
+        );
+        RAISE;
+END;
+$$;
+
+-- Права на выполнение функции
+REVOKE ALL ON FUNCTION app.change_employee_password(VARCHAR(100), TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.change_employee_password(VARCHAR(100), TEXT) TO security_admin;
+GRANT EXECUTE ON FUNCTION app.change_employee_password(VARCHAR(100), TEXT) TO app_owner;
+
+-- ===========================================================================
+-- ТРИГГЕР, БЛОКИРУЮЩИЙ ПРЯМУЮ СМЕНУ ПАРОЛЯ В ТАБЛИЦЕ employees
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.block_employee_password_direct_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app, audit'
+AS $$
+DECLARE
+    v_caller_role TEXT := session_user;
+    v_has_allowance BOOLEAN;
+    v_stack TEXT;
+BEGIN
+    -- ПОЛУЧАЕМ СТЕК ВЫЗОВОВ (чтобы определить, вызвано ли из нашей функции)
+    GET DIAGNOSTICS v_stack = PG_CONTEXT;
+    
+    -- ЕСЛИ ИЗМЕНЕНИЕ ПРОИСХОДИТ ИЗ ФУНКЦИИ change_employee_password - РАЗРЕШАЕМ
+    IF v_stack LIKE '%change_employee_password%' THEN
+        RETURN NEW;
+    END IF;
+    
+    -- Проверяем, что это действительно изменение пароля
+    IF TG_OP = 'UPDATE' AND OLD.password_hash IS DISTINCT FROM NEW.password_hash THEN
+        
+        -- Проверка 1: security_admin может менять напрямую
+        IF pg_has_role(v_caller_role, 'security_admin', 'MEMBER') THEN
+            INSERT INTO audit.function_calls (
+                function_name, caller_role, input_params, success
+            ) VALUES (
+                'direct_password_change_by_admin',
+                v_caller_role,
+                jsonb_build_object('target_user', NEW.username),
+                true
+            );
+            RETURN NEW;
+        END IF;
+        
+        -- Проверка 2: Есть ли активное разрешение?
+        SELECT EXISTS(
+            SELECT 1 FROM app.password_change_allowance
+            WHERE username = NEW.username
+              AND expires_at > NOW()
+              AND is_used = FALSE
+        ) INTO v_has_allowance;
+        
+        IF NOT v_has_allowance THEN
+            RAISE EXCEPTION 'ПРЯМАЯ СМЕНА ПАРОЛЯ ЗАПРЕЩЕНА. Используйте функцию app.change_employee_password() или получите разрешение от security_admin (SELECT app.grant_temp_password_change(''%''))', 
+                NEW.username;
+        END IF;
+        
+        -- Если разрешение есть - помечаем как использованное
+        UPDATE app.password_change_allowance
+        SET is_used = TRUE
+        WHERE username = NEW.username AND is_used = FALSE;
+        
+        INSERT INTO audit.function_calls (
+            function_name, caller_role, input_params, success
+        ) VALUES (
+            'password_change_via_allowance',
+            v_caller_role,
+            jsonb_build_object('target_user', NEW.username),
+            true
+        );
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+-- Создаем триггер на таблицу employees
+DROP TRIGGER IF EXISTS trg_block_employee_password_direct_update ON app.employees;
+
+CREATE TRIGGER trg_block_employee_password_direct_update
+    BEFORE UPDATE OF password_hash ON app.employees
+    FOR EACH ROW
+    EXECUTE FUNCTION app.block_employee_password_direct_update();
+
+-- ===========================================================================
+-- БЛОКИРОВКА DELETE ИЗ ТАБЛИЦЫ employees
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.block_employee_delete()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    -- Только security_admin может удалять сотрудников
+    IF NOT pg_has_role(session_user, 'security_admin', 'MEMBER') THEN
+        RAISE EXCEPTION 'Удаление сотрудников разрешено только security_admin. Используйте: DELETE FROM app.employees WHERE username = ''%'' (после входа под security_admin)', 
+            OLD.username;
+    END IF;
+    
+    RETURN OLD;
+END;
+$$;
+
+-- Триггер на DELETE
+DROP TRIGGER IF EXISTS trg_block_employee_delete ON app.employees;
+
+CREATE TRIGGER trg_block_employee_delete
+    BEFORE DELETE ON app.employees
+    FOR EACH ROW
+    EXECUTE FUNCTION app.block_employee_delete();
+
+-- ===========================================================================
+-- ФУНКЦИЯ ДЛЯ ИНИЦИАЛИЗАЦИИ ТАБЛИЦЫ СОТРУДНИКОВ
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.initialize_employees_from_roles()
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app'
+AS $$
+DECLARE
+    v_count INTEGER := 0;
+    v_role RECORD;
+BEGIN
+    -- Только security_admin может инициализировать
+    IF NOT pg_has_role(session_user, 'security_admin', 'MEMBER') THEN
+        RAISE EXCEPTION 'Только security_admin может инициализировать таблицу сотрудников';
+    END IF;
+    
+    -- Заполняем из существующих ролей, которые есть в БД
+    FOR v_role IN 
+        SELECT rolname FROM pg_roles 
+        WHERE rolname NOT IN ('postgres', 'pg_signal_backend', 'pg_read_all_stats', 
+                              'pg_read_all_settings', 'pg_stat_scan_tables', 'pg_monitor',
+                              'pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program')
+          AND rolname NOT LIKE 'pg_%'
+          AND NOT EXISTS (SELECT 1 FROM app.employees WHERE username = rolname)
+    LOOP
+        INSERT INTO app.employees (username, password_hash, full_name, updated_by)
+        VALUES (
+            v_role.rolname,
+            public.crypt('Temp_' || v_role.rolname || '_' || to_char(NOW(), 'YYYYMMDD'), 
+                        public.gen_salt('bf')),
+            'Сотрудник ' || v_role.rolname,
+            'system'
+        );
+        v_count := v_count + 1;
+    END LOOP;
+    
+    RETURN format('Инициализировано %s записей сотрудников', v_count);
+END;
+$$;
+
+-- ===========================================================================
+-- ПРАВА ДОСТУПА
+-- ===========================================================================
+
+GRANT SELECT ON app.employees TO app_reader, auditor;
+GRANT SELECT, UPDATE (password_hash, updated_at, updated_by) ON app.employees TO security_admin;
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.password_change_allowance TO security_admin;
+
+GRANT EXECUTE ON FUNCTION app.grant_temp_password_change(VARCHAR(100), INTEGER) TO security_admin;
+GRANT EXECUTE ON FUNCTION app.change_employee_password(VARCHAR(100), TEXT) TO security_admin, app_owner;
+GRANT EXECUTE ON FUNCTION app.initialize_employees_from_roles() TO security_admin;
+
+-- Использование последовательностей
+GRANT USAGE ON SEQUENCE app.employees_employee_id_seq TO security_admin;
+GRANT USAGE ON SEQUENCE app.password_change_allowance_allowance_id_seq TO security_admin;
