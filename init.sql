@@ -3539,7 +3539,7 @@ CREATE TRIGGER trg_student_email_unique
     FOR EACH ROW
     EXECUTE FUNCTION app.check_email_uniqueness();
 
--- связанные таблицы!!!!!!!!!!!!!
+-- связанные таблицы
 -- ===========================================================================
 -- ТАБЛИЦА ДЛЯ ХРАНЕНИЯ СКИДОК СТУДЕНТОВ-ПЛАТНИКОВ
 -- ===========================================================================
@@ -3560,12 +3560,6 @@ CREATE TABLE IF NOT EXISTS app.student_discounts (
 -- Индекс для быстрого поиска
 CREATE INDEX IF NOT EXISTS idx_student_discounts_student ON app.student_discounts(student_id, semester);
 CREATE INDEX IF NOT EXISTS idx_student_discounts_updated ON app.student_discounts(last_updated);
-
--- Комментарии
-COMMENT ON TABLE app.student_discounts IS 'Текущие скидки студентов-платников на обучение';
-COMMENT ON COLUMN app.student_discounts.current_discount_percent IS 'Текущий процент скидки';
-COMMENT ON COLUMN app.student_discounts.previous_discount_percent IS 'Предыдущий процент скидки (для отслеживания изменений)';
-COMMENT ON COLUMN app.student_discounts.last_calculated_gpa IS 'GPA, на основе которого рассчитана скидка';
 
 -- ===========================================================================
 -- ФУНКЦИЯ ДЛЯ РАСЧЕТА СКИДКИ НА ОСНОВЕ GPA
@@ -3984,11 +3978,6 @@ CREATE TABLE IF NOT EXISTS app.employees (
 -- Индекс для быстрого поиска по логину
 CREATE INDEX IF NOT EXISTS idx_employees_username ON app.employees(username);
 
--- Комментарии
-COMMENT ON TABLE app.employees IS 'Сотрудники системы (логины и пароли)';
-COMMENT ON COLUMN app.employees.username IS 'Логин сотрудника (соответствует роли в БД)';
-COMMENT ON COLUMN app.employees.password_hash IS 'Хеш пароля сотрудника';
-
 -- ===========================================================================
 -- ТАБЛИЦА ДЛЯ ВРЕМЕННЫХ РАЗРЕШЕНИЙ НА СМЕНУ ПАРОЛЯ
 -- ===========================================================================
@@ -4007,13 +3996,6 @@ CREATE TABLE IF NOT EXISTS app.password_change_allowance (
 CREATE INDEX IF NOT EXISTS idx_password_change_allowance_active 
 ON app.password_change_allowance(username, expires_at) 
 WHERE is_used = FALSE;
-
--- Комментарии
-COMMENT ON TABLE app.password_change_allowance IS 'Временные разрешения на смену пароля';
-COMMENT ON COLUMN app.password_change_allowance.username IS 'Логин сотрудника, которому разрешена смена пароля';
-COMMENT ON COLUMN app.password_change_allowance.allowed_by IS 'Кто выдал разрешение (security_admin)';
-COMMENT ON COLUMN app.password_change_allowance.expires_at IS 'Срок действия разрешения';
-COMMENT ON COLUMN app.password_change_allowance.is_used IS 'Использовано ли разрешение';
 
 -- ===========================================================================
 -- ФУНКЦИЯ ДЛЯ ВЫДАЧИ ВРЕМЕННОГО РАЗРЕШЕНИЯ НА СМЕНУ ПАРОЛЯ
@@ -4381,3 +4363,4 @@ GRANT EXECUTE ON FUNCTION app.initialize_employees_from_roles() TO security_admi
 -- Использование последовательностей
 GRANT USAGE ON SEQUENCE app.employees_employee_id_seq TO security_admin;
 GRANT USAGE ON SEQUENCE app.password_change_allowance_allowance_id_seq TO security_admin;
+
