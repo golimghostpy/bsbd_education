@@ -5,6 +5,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE ROLE test_connect WITH LOGIN;
 
+CREATE USER test_app_owner WITH PASSWORD 'secret1';
+CREATE USER test_app_writer WITH PASSWORD 'secret2';
+CREATE USER test_app_reader WITH PASSWORD 'secret3';
+
 --schemas
 CREATE SCHEMA IF NOT EXISTS app;
 CREATE SCHEMA IF NOT EXISTS ref;
