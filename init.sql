@@ -1,7 +1,7 @@
 --revoke
 REVOKE ALL ON DATABASE education_db FROM PUBLIC;
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 CREATE ROLE test_connect WITH LOGIN;
 
@@ -171,8 +171,8 @@ CREATE TABLE app.teachers (
     patronymic VARCHAR(50),
     academic_degree academic_degree_enum,
     academic_title academic_title_enum,
-    email VARCHAR(255) UNIQUE,
-    phone_number VARCHAR(20)
+    email BYTEA,
+    phone_number BYTEA
 );
 
 -- 2.6. Студенты
@@ -270,8 +270,8 @@ CREATE TABLE app.student_documents (
     document_id SERIAL PRIMARY KEY,
     student_id INT NOT NULL,
     document_type document_type_enum NOT NULL,
-    document_series VARCHAR(20),
-    document_number VARCHAR(50) NOT NULL,
+    document_series BYTEA,
+    document_number BYTEA NOT NULL,
     issue_date DATE,
     issuing_authority TEXT,
     FOREIGN KEY (student_id) REFERENCES app.students(student_id) ON DELETE CASCADE
@@ -541,6 +541,333 @@ CREATE INDEX idx_grades_student_segment_semester ON app.final_grades(segment_id,
 CREATE INDEX idx_grades_subject_segment ON app.final_grades(segment_id, subject_id);
 CREATE INDEX idx_schedule_group_segment_week ON app.class_schedule(segment_id, group_id, week_number);
 CREATE INDEX idx_plans_group_segment ON app.academic_plans(segment_id, group_id);
+
+-- ===========================================================================
+-- ФУНКЦИИ ДЛЯ СИММЕТРИЧНОГО ШИФРОВАНИЯ (для таблицы teachers)
+-- ===========================================================================
+
+-- Функция для симметричного шифрования (читает ключ из файла)
+CREATE OR REPLACE FUNCTION app.encrypt_symmetric(
+    p_plaintext TEXT
+) RETURNS BYTEA
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'public'
+AS $$
+DECLARE
+    v_key TEXT;
+    v_ciphertext BYTEA;
+BEGIN
+    -- Читаем симметричный ключ из файла
+    BEGIN
+        v_key := pg_read_file('/pgp_keys/symmetric.key', 0, 100)::TEXT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE EXCEPTION 'Не удалось прочитать симметричный ключ: %', SQLERRM;
+    END;
+    
+    -- Обрезаем возможные пробелы/переводы строк
+    v_key := regexp_replace(v_key, '\s+$', '');
+    
+    -- Шифруем с использованием pgcrypto
+    v_ciphertext := encrypt(
+        p_plaintext::BYTEA,
+        v_key::BYTEA,
+        'aes'
+    );
+    
+    RETURN v_ciphertext;
+END;
+$$;
+
+-- Функция для симметричной расшифровки (читает ключ из файла)
+CREATE OR REPLACE FUNCTION app.decrypt_symmetric(
+    p_ciphertext BYTEA
+) RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'public'
+AS $$
+DECLARE
+    v_key TEXT;
+    v_plaintext BYTEA;
+BEGIN
+    -- Читаем симметричный ключ из файла
+    BEGIN
+        v_key := pg_read_file('/pgp_keys/symmetric.key', 0, 100)::TEXT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE EXCEPTION 'Не удалось прочитать симметричный ключ: %', SQLERRM;
+    END;
+    
+    -- Обрезаем возможные пробелы/переводы строк
+    v_key := regexp_replace(v_key, '\s+$', '');
+    
+    -- Расшифровываем
+    v_plaintext := decrypt(
+        p_ciphertext,
+        v_key::BYTEA,
+        'aes'
+    );
+    
+    RETURN v_plaintext::TEXT;
+END;
+$$;
+
+-- ===========================================================================
+-- ФУНКЦИИ ДЛЯ АСИММЕТРИЧНОГО ШИФРОВАНИЯ (для таблицы student_documents)
+-- ===========================================================================
+
+-- Функция для асимметричного шифрования (использует открытый ключ)
+CREATE OR REPLACE FUNCTION app.encrypt_asymmetric(
+    p_plaintext TEXT
+) RETURNS BYTEA
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'public'
+AS $$
+DECLARE
+    v_public_key TEXT;
+    v_ciphertext BYTEA;
+BEGIN
+    -- Читаем открытый ключ из файла
+    BEGIN
+        v_public_key := pg_read_file('/pgp_keys/public.key', 0, 10000)::TEXT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE EXCEPTION 'Не удалось прочитать открытый ключ: %', SQLERRM;
+    END;
+    
+    -- Шифруем с использованием pgp_pub_encrypt
+    v_ciphertext := pgp_pub_encrypt(
+        p_plaintext,
+        dearmor(v_public_key)
+    );
+    
+    RETURN v_ciphertext;
+END;
+$$;
+
+-- Функция для асимметричной расшифровки (использует приватный ключ)
+CREATE OR REPLACE FUNCTION app.decrypt_asymmetric(
+    p_ciphertext BYTEA
+) RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'public'
+AS $$
+DECLARE
+    v_private_key TEXT;
+    v_plaintext TEXT;
+BEGIN
+    -- Читаем приватный ключ из файла
+    BEGIN
+        v_private_key := pg_read_file('/pgp_keys/private.key', 0, 10000)::TEXT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE EXCEPTION 'Не удалось прочитать приватный ключ: %', SQLERRM;
+    END;
+    
+    -- Расшифровываем с использованием pgp_pub_decrypt
+    v_plaintext := pgp_pub_decrypt(
+        p_ciphertext,
+        dearmor(v_private_key)
+    );
+    
+    RETURN v_plaintext;
+END;
+$$;
+
+-- ===========================================================================
+-- ТРИГГЕРНАЯ ФУНКЦИЯ ДЛЯ СИММЕТРИЧНОГО ШИФРОВАНИЯ (teachers.email и phone_number)
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.encrypt_teachers_sensitive()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app'
+AS $$
+BEGIN
+    -- Шифруем email если он предоставлен
+    IF NEW.email IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.email != OLD.email) THEN
+        NEW.email = app.encrypt_symmetric(NEW.email::TEXT);
+    END IF;
+    
+    -- Шифруем phone_number если он предоставлен
+    IF NEW.phone_number IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.phone_number != OLD.phone_number) THEN
+        NEW.phone_number = app.encrypt_symmetric(NEW.phone_number::TEXT);
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+-- ===========================================================================
+-- ТРИГГЕРНАЯ ФУНКЦИЯ ДЛЯ АСИММЕТРИЧНОГО ШИФРОВАНИЯ (student_documents)
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION app.encrypt_student_documents_asymmetric()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app'
+AS $$
+BEGIN
+    -- Шифруем document_series если он предоставлен
+    IF NEW.document_series IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.document_series != OLD.document_series) THEN
+        NEW.document_series = app.encrypt_asymmetric(NEW.document_series::TEXT);
+    END IF;
+    
+    -- Шифруем document_number (обязательное поле)
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.document_number != OLD.document_number) THEN
+        NEW.document_number = app.encrypt_asymmetric(NEW.document_number::TEXT);
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+-- ===========================================================================
+-- ТРИГГЕРЫ ДЛЯ ТАБЛИЦЫ teachers (симметричное шифрование)
+-- ===========================================================================
+
+DROP TRIGGER IF EXISTS trg_encrypt_teachers_sensitive ON app.teachers;
+
+CREATE TRIGGER trg_encrypt_teachers_sensitive
+    BEFORE INSERT OR UPDATE OF email, phone_number ON app.teachers
+    FOR EACH ROW
+    EXECUTE FUNCTION app.encrypt_teachers_sensitive();
+
+-- ===========================================================================
+-- ТРИГГЕРЫ ДЛЯ ТАБЛИЦЫ student_documents (асимметричное шифрование)
+-- ===========================================================================
+
+DROP TRIGGER IF EXISTS trg_encrypt_student_documents_asymmetric ON app.student_documents;
+
+CREATE TRIGGER trg_encrypt_student_documents_asymmetric
+    BEFORE INSERT OR UPDATE OF document_series, document_number ON app.student_documents
+    FOR EACH ROW
+    EXECUTE FUNCTION app.encrypt_student_documents_asymmetric();
+
+-- ===========================================================================
+-- ПРАВА НА ШИФРОВАНИЕ (для всех, у кого есть право на запись)
+-- ===========================================================================
+
+-- Функции шифрования доступны всем, кто может писать в таблицы
+GRANT EXECUTE ON FUNCTION app.encrypt_symmetric(TEXT) TO app_writer, dml_admin, app_owner;
+GRANT EXECUTE ON FUNCTION app.encrypt_asymmetric(TEXT) TO app_writer, dml_admin, app_owner;
+
+-- ===========================================================================
+-- ПРАВА НА РАСШИФРОВКУ (только для security_admin)
+-- ===========================================================================
+
+-- Функции расшифровки доступны ТОЛЬКО security_admin
+GRANT EXECUTE ON FUNCTION app.decrypt_symmetric(BYTEA) TO security_admin;
+GRANT EXECUTE ON FUNCTION app.decrypt_asymmetric(BYTEA) TO security_admin;
+
+-- ===========================================================================
+-- ФУНКЦИИ ДЛЯ УДОБНОГО ПРОСМОТРА РАСШИФРОВАННЫХ ДАННЫХ (для security_admin)
+-- ===========================================================================
+
+-- Функция для просмотра расшифрованных данных преподавателей
+CREATE OR REPLACE FUNCTION app.view_teachers_decrypted()
+RETURNS TABLE (
+    teacher_id INT,
+    last_name VARCHAR(50),
+    first_name VARCHAR(50),
+    patronymic VARCHAR(50),
+    academic_degree academic_degree_enum,
+    academic_title academic_title_enum,
+    email TEXT,
+    phone_number TEXT,
+    segment_id INT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app'
+AS $$
+BEGIN
+    -- Проверяем, что вызывающий имеет право на расшифровку
+    IF NOT pg_has_role(session_user, 'security_admin', 'MEMBER') THEN
+        RAISE EXCEPTION 'Только security_admin может просматривать расшифрованные данные';
+    END IF;
+    
+    RETURN QUERY
+    SELECT 
+        t.teacher_id,
+        t.last_name,
+        t.first_name,
+        t.patronymic,
+        t.academic_degree,
+        t.academic_title,
+        app.decrypt_symmetric(t.email) AS email,
+        app.decrypt_symmetric(t.phone_number) AS phone_number,
+        t.segment_id
+    FROM app.teachers t;
+END;
+$$;
+
+-- Функция для просмотра расшифрованных документов студентов
+CREATE OR REPLACE FUNCTION app.view_student_documents_decrypted(
+    p_student_id INT DEFAULT NULL
+)
+RETURNS TABLE (
+    document_id INT,
+    student_id INT,
+    document_type document_type_enum,
+    document_series TEXT,
+    document_number TEXT,
+    issue_date DATE,
+    issuing_authority TEXT,
+    segment_id INT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'app'
+AS $$
+BEGIN
+    -- Проверяем, что вызывающий имеет право на расшифровку
+    IF NOT pg_has_role(session_user, 'security_admin', 'MEMBER') THEN
+        RAISE EXCEPTION 'Только security_admin может просматривать расшифрованные данные';
+    END IF;
+    
+    IF p_student_id IS NULL THEN
+        -- Все документы
+        RETURN QUERY
+        SELECT 
+            sd.document_id,
+            sd.student_id,
+            sd.document_type,
+            app.decrypt_asymmetric(sd.document_series) AS document_series,
+            app.decrypt_asymmetric(sd.document_number) AS document_number,
+            sd.issue_date,
+            sd.issuing_authority,
+            sd.segment_id
+        FROM app.student_documents sd;
+    ELSE
+        -- Документы конкретного студента
+        RETURN QUERY
+        SELECT 
+            sd.document_id,
+            sd.student_id,
+            sd.document_type,
+            app.decrypt_asymmetric(sd.document_series) AS document_series,
+            app.decrypt_asymmetric(sd.document_number) AS document_number,
+            sd.issue_date,
+            sd.issuing_authority,
+            sd.segment_id
+        FROM app.student_documents sd
+        WHERE sd.student_id = p_student_id;
+    END IF;
+END;
+$$;
+
+-- Права на функции просмотра
+GRANT EXECUTE ON FUNCTION app.decrypt_symmetric(BYTEA) TO security_admin;
+GRANT EXECUTE ON FUNCTION app.decrypt_asymmetric(BYTEA) TO security_admin;
+GRANT EXECUTE ON FUNCTION app.view_teachers_decrypted() TO security_admin;
+GRANT EXECUTE ON FUNCTION app.view_student_documents_decrypted(INT) TO security_admin;
 
 -- ОБНОВЛЕННОЕ ЗАПОЛНЕНИЕ ТЕСТОВЫХ ДАННЫХ С СЕГМЕНТАЦИЕЙ
 
@@ -1523,7 +1850,7 @@ SELECT
     first_name,
     patronymic,
     email,
-    phone_number
+    phone_number,
     academic_degree, 
     academic_title
 FROM app.teachers
@@ -4367,4 +4694,3 @@ GRANT EXECUTE ON FUNCTION app.initialize_employees_from_roles() TO security_admi
 -- Использование последовательностей
 GRANT USAGE ON SEQUENCE app.employees_employee_id_seq TO security_admin;
 GRANT USAGE ON SEQUENCE app.password_change_allowance_allowance_id_seq TO security_admin;
-
