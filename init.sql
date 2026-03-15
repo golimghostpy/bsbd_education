@@ -610,7 +610,7 @@ BEGIN
         'aes'
     );
     
-    RETURN v_plaintext::TEXT;
+    RETURN convert_from(v_plaintext, 'UTF8');
 END;
 $$;
 
@@ -672,9 +672,9 @@ BEGIN
     v_plaintext := pgp_pub_decrypt(
         p_ciphertext,
         dearmor(v_private_key)
-    );
+    )::TEXT;
     
-    RETURN v_plaintext;
+    RETURN convert_from(decode(trim(leading '\x' from v_plaintext), 'hex'), 'UTF8');
 END;
 $$;
 
@@ -763,6 +763,8 @@ GRANT EXECUTE ON FUNCTION app.encrypt_asymmetric(TEXT) TO app_writer, dml_admin,
 -- ===========================================================================
 
 -- Функции расшифровки доступны ТОЛЬКО security_admin
+REVOKE EXECUTE ON FUNCTION app.decrypt_symmetric(BYTEA) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.decrypt_asymmetric(BYTEA) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.decrypt_symmetric(BYTEA) TO security_admin;
 GRANT EXECUTE ON FUNCTION app.decrypt_asymmetric(BYTEA) TO security_admin;
 
@@ -787,12 +789,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = 'app'
 AS $$
-BEGIN
-    -- Проверяем, что вызывающий имеет право на расшифровку
-    IF NOT pg_has_role(session_user, 'security_admin', 'MEMBER') THEN
-        RAISE EXCEPTION 'Только security_admin может просматривать расшифрованные данные';
-    END IF;
-    
+BEGIN    
     RETURN QUERY
     SELECT 
         t.teacher_id,
@@ -827,11 +824,6 @@ SECURITY DEFINER
 SET search_path = 'app'
 AS $$
 BEGIN
-    -- Проверяем, что вызывающий имеет право на расшифровку
-    IF NOT pg_has_role(session_user, 'security_admin', 'MEMBER') THEN
-        RAISE EXCEPTION 'Только security_admin может просматривать расшифрованные данные';
-    END IF;
-    
     IF p_student_id IS NULL THEN
         -- Все документы
         RETURN QUERY
@@ -864,6 +856,8 @@ END;
 $$;
 
 -- Права на функции просмотра
+REVOKE EXECUTE ON FUNCTION app.view_teachers_decrypted() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.view_student_documents_decrypted(INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.decrypt_symmetric(BYTEA) TO security_admin;
 GRANT EXECUTE ON FUNCTION app.decrypt_asymmetric(BYTEA) TO security_admin;
 GRANT EXECUTE ON FUNCTION app.view_teachers_decrypted() TO security_admin;
@@ -4344,11 +4338,6 @@ DECLARE
     v_expires_at TIMESTAMP;
     v_caller_role TEXT := session_user;
 BEGIN
-    -- Только security_admin может выдавать разрешения
-    IF NOT pg_has_role(v_caller_role, 'security_admin', 'MEMBER') THEN
-        RAISE EXCEPTION 'Только security_admin может выдавать разрешения на смену пароля';
-    END IF;
-    
     -- Проверяем, что такой сотрудник существует
     IF NOT EXISTS (SELECT 1 FROM app.employees WHERE username = p_username) THEN
         RAISE EXCEPTION 'Сотрудник с логином % не найден', p_username;
@@ -4694,3 +4683,5 @@ GRANT EXECUTE ON FUNCTION app.initialize_employees_from_roles() TO security_admi
 -- Использование последовательностей
 GRANT USAGE ON SEQUENCE app.employees_employee_id_seq TO security_admin;
 GRANT USAGE ON SEQUENCE app.password_change_allowance_allowance_id_seq TO security_admin;
+
+INSERT INTO app.role_segments (role_name, segment_id) VALUES ('test_connect', 1);
