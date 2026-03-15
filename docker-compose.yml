@@ -11,6 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data #хранилище
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql #инициализация
+      - ./pgp_keys:/pgp_keys:ro
     restart: unless-stopped
   
 volumes:
