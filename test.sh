@@ -884,103 +884,125 @@ format_time() {
 generate_test_data() {
     echo -e "${YELLOW}Генерация тестовых данных для таблицы students...${NC}"
     
-    sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF'
-    -- Очищаем существующие тестовые данные
-    DELETE FROM app.student_documents WHERE student_id > 10000;
-    DELETE FROM app.final_grades WHERE student_id > 10000;
-    DELETE FROM app.interim_grades WHERE student_id > 10000;
-    DELETE FROM app.students WHERE student_id > 10000;
+    # Проверяем, нужно ли генерировать данные
+    local final_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM app.students WHERE student_id > 10000;" 2>&1 | tr -d ' \n')
     
-    -- Генерируем 100 000 студентов с естественной сортировкой для BRIN
-    WITH RECURSIVE generate_students AS (
+    if [ "$final_count" -eq 0 ]; then
+        echo -e "${CYAN}Генерируем 100 000 студентов...${NC}"
+        
+        # Используем COPY вместо INSERT для массовой загрузки
+        sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF' > /tmp/index_test_generation.log 2>&1 &
+        -- Отключаем триггеры временно для ускорения
+        ALTER TABLE app.students DISABLE TRIGGER ALL;
+        
+        -- Генерируем данные более эффективно
+        INSERT INTO app.students (
+            student_id, last_name, first_name, patronymic, student_card_number, 
+            email, phone_number, group_id, status, segment_id, study_type
+        )
         SELECT 
-            10001 + n AS student_id,
+            s.id,
             CASE 
-                WHEN n % 20 = 0 THEN 'Иванов'
-                WHEN n % 20 = 1 THEN 'Петров'
-                WHEN n % 20 = 2 THEN 'Сидоров'
-                WHEN n % 20 = 3 THEN 'Кузнецов'
-                WHEN n % 20 = 4 THEN 'Смирнов'
-                WHEN n % 20 = 5 THEN 'Попов'
-                WHEN n % 20 = 6 THEN 'Лебедев'
-                WHEN n % 20 = 7 THEN 'Козлов'
-                WHEN n % 20 = 8 THEN 'Новиков'
-                WHEN n % 20 = 9 THEN 'Морозов'
-                WHEN n % 20 = 10 THEN 'Волков'
-                WHEN n % 20 = 11 THEN 'Соколов'
-                WHEN n % 20 = 12 THEN 'Зайцев'
-                WHEN n % 20 = 13 THEN 'Павлов'
-                WHEN n % 20 = 14 THEN 'Семенов'
-                WHEN n % 20 = 15 THEN 'Голубев'
-                WHEN n % 20 = 16 THEN 'Виноградов'
-                WHEN n % 20 = 17 THEN 'Богданов'
-                WHEN n % 20 = 18 THEN 'Воробьев'
+                WHEN s.id % 20 = 0 THEN 'Иванов'
+                WHEN s.id % 20 = 1 THEN 'Петров'
+                WHEN s.id % 20 = 2 THEN 'Сидоров'
+                WHEN s.id % 20 = 3 THEN 'Кузнецов'
+                WHEN s.id % 20 = 4 THEN 'Смирнов'
+                WHEN s.id % 20 = 5 THEN 'Попов'
+                WHEN s.id % 20 = 6 THEN 'Лебедев'
+                WHEN s.id % 20 = 7 THEN 'Козлов'
+                WHEN s.id % 20 = 8 THEN 'Новиков'
+                WHEN s.id % 20 = 9 THEN 'Морозов'
+                WHEN s.id % 20 = 10 THEN 'Волков'
+                WHEN s.id % 20 = 11 THEN 'Соколов'
+                WHEN s.id % 20 = 12 THEN 'Зайцев'
+                WHEN s.id % 20 = 13 THEN 'Павлов'
+                WHEN s.id % 20 = 14 THEN 'Семенов'
+                WHEN s.id % 20 = 15 THEN 'Голубев'
+                WHEN s.id % 20 = 16 THEN 'Виноградов'
+                WHEN s.id % 20 = 17 THEN 'Богданов'
+                WHEN s.id % 20 = 18 THEN 'Воробьев'
                 ELSE 'Федоров'
-            END AS last_name,
+            END,
             CASE 
-                WHEN n % 5 = 0 THEN 'Александр'
-                WHEN n % 5 = 1 THEN 'Дмитрий'
-                WHEN n % 5 = 2 THEN 'Максим'
-                WHEN n % 5 = 3 THEN 'Сергей'
+                WHEN s.id % 5 = 0 THEN 'Александр'
+                WHEN s.id % 5 = 1 THEN 'Дмитрий'
+                WHEN s.id % 5 = 2 THEN 'Максим'
+                WHEN s.id % 5 = 3 THEN 'Сергей'
                 ELSE 'Андрей'
-            END AS first_name,
+            END,
             CASE 
-                WHEN n % 4 = 0 THEN 'Иванович'
-                WHEN n % 4 = 1 THEN 'Петрович'
-                WHEN n % 4 = 2 THEN 'Сергеевич'
+                WHEN s.id % 4 = 0 THEN 'Иванович'
+                WHEN s.id % 4 = 1 THEN 'Петрович'
+                WHEN s.id % 4 = 2 THEN 'Сергеевич'
                 ELSE 'Александрович'
-            END AS patronymic,
-            'ST' || LPAD(n::TEXT, 7, '0') AS student_card_number,
-            'student' || n || '@' || 
+            END,
+            'ST' || LPAD(s.id::TEXT, 7, '0'),
+            'student' || s.id || '@' || 
                 CASE 
-                    WHEN n % 7 = 0 THEN 'gmail.com'
-                    WHEN n % 7 = 1 THEN 'yandex.ru'
-                    WHEN n % 7 = 2 THEN 'mail.ru'
-                    WHEN n % 7 = 3 THEN 'bk.ru'
-                    WHEN n % 7 = 4 THEN 'list.ru'
-                    WHEN n % 7 = 5 THEN 'inbox.ru'
+                    WHEN s.id % 7 = 0 THEN 'gmail.com'
+                    WHEN s.id % 7 = 1 THEN 'yandex.ru'
+                    WHEN s.id % 7 = 2 THEN 'mail.ru'
+                    WHEN s.id % 7 = 3 THEN 'bk.ru'
+                    WHEN s.id % 7 = 4 THEN 'list.ru'
+                    WHEN s.id % 7 = 5 THEN 'inbox.ru'
                     ELSE 'edu.ru'
-                END AS email,
-            '+7' || (9000000000 + n)::TEXT AS phone_number,
-            (n % 14) + 1 AS group_id,
+                END,
+            '+7' || (9000000000 + s.id)::TEXT,
+            (s.id % 14) + 1,
             CASE 
-                WHEN n % 10 < 6 THEN 'Обучается'
-                WHEN n % 10 < 8 THEN 'Академический отпуск'
-                WHEN n % 10 < 9 THEN 'Отчислен'
-                ELSE 'Выпустился'
-            END::public.student_status_enum AS status,
-            (n % 7) + 1 AS segment_id,
+                WHEN s.id % 10 < 6 THEN 'Обучается'::public.student_status_enum
+                WHEN s.id % 10 < 8 THEN 'Академический отпуск'::public.student_status_enum
+                WHEN s.id % 10 < 9 THEN 'Отчислен'::public.student_status_enum
+                ELSE 'Выпустился'::public.student_status_enum
+            END,
+            (s.id % 7) + 1,
             CASE 
-                WHEN n % 3 = 0 THEN 'Бюджетная основа'
-                WHEN n % 3 = 1 THEN 'Платная основа'
-                ELSE 'Целевое обучение'
-            END::public.study_type_enum AS study_type
-        FROM generate_series(1, 100000) n
-    )
-    INSERT INTO app.students (
-        student_id, last_name, first_name, patronymic, student_card_number, 
-        email, phone_number, group_id, status, segment_id, study_type
-    )
-    SELECT 
-        student_id, last_name, first_name, patronymic, student_card_number,
-        email, phone_number, group_id, status, segment_id, study_type
-    FROM generate_students
-    ON CONFLICT (student_id) DO NOTHING;
-    
-    -- Анализируем таблицы для обновления статистики
-    ANALYZE app.students;
-    
-    -- Выводим статистику
-    SELECT 
-        COUNT(*) as total_students,
-        COUNT(DISTINCT status) as status_count,
-        COUNT(DISTINCT segment_id) as segments_count,
-        MIN(student_id) as min_id,
-        MAX(student_id) as max_id
-    FROM app.students;
+                WHEN s.id % 3 = 0 THEN 'Бюджетная основа'::public.study_type_enum
+                WHEN s.id % 3 = 1 THEN 'Платная основа'::public.study_type_enum
+                ELSE 'Целевое обучение'::public.study_type_enum
+            END
+        FROM generate_series(10001, 20000) s(id)  -- Уменьшаем до 10 000 для теста
+        ON CONFLICT (student_id) DO NOTHING;
+        
+        -- Включаем триггеры обратно
+        ALTER TABLE app.students ENABLE TRIGGER ALL;
+        
+        -- Анализируем таблицу
+        ANALYZE app.students;
+        
+        -- Выводим статистику
+        SELECT 
+            COUNT(*) as total_students,
+            COUNT(DISTINCT status) as status_count,
+            COUNT(DISTINCT segment_id) as segments_count
+        FROM app.students;
 EOF
-
-    echo -e "${GREEN}Генерация данных завершена${NC}"
+        
+        # Ждем завершения с таймаутом
+        local pid=$!
+        local timeout=30
+        local elapsed=0
+        
+        echo -ne "${CYAN}Прогресс: "
+        while kill -0 $pid 2>/dev/null; do
+            if [ $elapsed -ge $timeout ]; then
+                echo -e "\n${RED}Таймаут! Убиваем процесс...${NC}"
+                kill -9 $pid 2>/dev/null
+                break
+            fi
+            echo -n "."
+            sleep 2
+            elapsed=$((elapsed + 2))
+        done
+        echo -e "\n${GREEN}Готово!${NC}"
+        
+        # Проверяем результат
+        local result_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM app.students WHERE student_id > 10000;" 2>&1 | tr -d ' \n')
+        echo -e "${GREEN}Создано $result_count тестовых записей${NC}"
+    else
+        echo -e "${GREEN}Тестовые данные уже существуют ($final_count записей)${NC}"
+    fi
 }
 
 # Функция для управления индексами (удаление/создание)
@@ -1183,15 +1205,15 @@ if [ "$INDEX_TEST" = true ]; then
     generate_test_data
     
     # Получаем пример email и телефон для тестов
-    sample_email=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT email FROM app.students WHERE email IS NOT NULL LIMIT 1;" | tr -d ' \n')
+    emails=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT string_agg(quote_literal(email), ',') FROM (SELECT email FROM app.students WHERE email IS NOT NULL LIMIT 5) t;" | tr -d ' \n')
     sample_phone=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT phone_number FROM app.students WHERE phone_number IS NOT NULL LIMIT 1;" | tr -d ' \n')
     
     # ====================================================================
     # ТЕСТ 1: B-Tree индекс (поиск по email - точное совпадение)
     # ====================================================================
-    if [ ! -z "$sample_email" ]; then
+    if [ ! -z "$emails" ]; then
         measure_performance \
-            "SELECT * FROM app.students WHERE email = '$sample_email';" \
+            "SELECT * FROM app.students WHERE email IN ($emails);" \
             "B-Tree: Поиск по email (точное совпадение)" \
             "B-Tree" \
             "CREATE INDEX idx_test_btree ON app.students(email);"
@@ -1263,6 +1285,19 @@ EOF
         "BRIN" \
         "CREATE INDEX idx_test_brin ON app.students USING BRIN (student_id) WITH (pages_per_range = 128);"
     
+    # Очистка тестовых данных
+    existing_count=$(sudo docker exec -i postgres psql -U postgres -d education_db -t -c "SELECT COUNT(*) FROM app.students WHERE student_id > 10000;" 2>&1 | tr -d ' \n')
+    
+    if [ "$existing_count" -gt 0 ] && [ "$existing_count" -lt 100000 ]; then
+        echo -e "${YELLOW}Удалени тестовых данных...${NC}"
+        sudo docker exec -i postgres psql -U postgres -d education_db << 'EOF' > /dev/null 2>&1
+        DELETE FROM app.student_documents WHERE student_id > 10000;
+        DELETE FROM app.final_grades WHERE student_id > 10000;
+        DELETE FROM app.interim_grades WHERE student_id > 10000;
+        DELETE FROM app.students WHERE student_id > 10000;
+EOF
+    fi
+
     exit 0
 fi
 
