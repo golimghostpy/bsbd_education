@@ -33,7 +33,7 @@ cat > /usr/local/bin/archive_wal.sh << 'EOF'
 WAL_PATH=\"\$1\"
 WAL_NAME=\"\$2\"
 ARCHIVE_DIR=\"$ARCHIVE_DIR\"
-PASSWORD=\"${DB_PASSWORD}\"
+PASSWORD=\"sychuk\"
 
 # Проверяем, что WAL файл существует
 if [ ! -f \"\$WAL_PATH\" ]; then
@@ -57,22 +57,13 @@ chmod +x /usr/local/bin/archive_wal.sh
 chown postgres:postgres /usr/local/bin/archive_wal.sh
 "
 
-# Бэкап текущей конфигурации
-echo "3. Создание резервной копии postgresql.conf..."
-docker exec -it $CONTAINER_NAME bash -c "
-    cp $PG_DATA_DIR/postgresql.conf $PG_DATA_DIR/postgresql.conf.backup_\$(date +%Y%m%d_%H%M%S)
-"
-
 # Настройка postgresql.conf
-echo "4. Настройка postgresql.conf для репликации и архивирования..."
+echo "3. Настройка postgresql.conf для репликации и архивирования..."
 docker exec -it $CONTAINER_NAME bash -c "
     # Удаляем старые настройки если есть
     sed -i '/^wal_level/d' $PG_DATA_DIR/postgresql.conf
     sed -i '/^archive_mode/d' $PG_DATA_DIR/postgresql.conf
     sed -i '/^archive_command/d' $PG_DATA_DIR/postgresql.conf
-    sed -i '/^max_wal_senders/d' $PG_DATA_DIR/postgresql.conf
-    sed -i '/^wal_keep_size/d' $PG_DATA_DIR/postgresql.conf
-    sed -i '/^hot_standby/d' $PG_DATA_DIR/postgresql.conf
     
     # Добавляем новые настройки
     cat >> $PG_DATA_DIR/postgresql.conf << EOL
@@ -81,36 +72,11 @@ docker exec -it $CONTAINER_NAME bash -c "
 wal_level = replica
 archive_mode = on
 archive_command = '/usr/local/bin/archive_wal.sh %p %f'
-max_wal_senders = 10
-wal_keep_size = 64
-hot_standby = on
 EOL
 "
 
-# Настройка pg_hba.conf для репликации
-echo "5. Настройка pg_hba.conf для репликации..."
-docker exec -it $CONTAINER_NAME bash -c "
-    # Создаем резервную копию
-    cp $PG_DATA_DIR/pg_hba.conf $PG_DATA_DIR/pg_hba.conf.backup_\$(date +%Y%m%d_%H%M%S)
-    
-    # Добавляем правило для репликации, если его еще нет
-    if ! grep -q '^host\s\+replication' $PG_DATA_DIR/pg_hba.conf; then
-        echo '' >> $PG_DATA_DIR/pg_hba.conf
-        echo '# Репликация' >> $PG_DATA_DIR/pg_hba.conf
-        echo 'host replication all 0.0.0.0/0 scram-sha-256' >> $PG_DATA_DIR/pg_hba.conf
-        echo 'host replication all ::/0 scram-sha-256' >> $PG_DATA_DIR/pg_hba.conf
-    fi
-"
-
-# Создание пользователя для репликации (если не существует)
-echo "6. Создание пользователя для репликации..."
-docker exec -it $CONTAINER_NAME bash -c "
-    PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d postgres -c \"SELECT 1 FROM pg_roles WHERE rolname='replicator'\" | grep -q 1 || \
-    PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d postgres -c \"CREATE USER replicator WITH REPLICATION LOGIN PASSWORD 'replicator_password'\"
-"
-
 # Перезапуск PostgreSQL от имени пользователя postgres с полным путем
-echo "7. Перезапуск PostgreSQL для применения настроек..."
+echo "4. Перезапуск PostgreSQL для применения настроек..."
 docker exec -it $CONTAINER_NAME bash -c "
     su - postgres -c \"/usr/lib/postgresql/17/bin/pg_ctl -D $PG_DATA_DIR -m fast -w restart\"
 "
@@ -122,7 +88,7 @@ echo "Итоговые настройки:"
 docker exec -it postgres psql -U postgres -d education_db -c "
 SELECT name, setting, unit, context 
 FROM pg_settings 
-WHERE name IN ('wal_level', 'archive_mode', 'archive_command', 'max_wal_senders', 'wal_keep_size', 'hot_standby');
+WHERE name IN ('wal_level', 'archive_mode', 'archive_command');
 "
 
 echo "Тестовое создание архива WAL"
